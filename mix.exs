@@ -23,7 +23,7 @@ defmodule NxStereo.MixProject do
   defp deps do
     [
       {:nx, "~> 1.0"},
-      {:nx_iree, path: "../nx_iree", optional: true},
+      {:nx_iree, github: "mlainez/nx_iree", branch: "jetson-nvk", optional: true},
       {:exla, "~> 1.0", only: :test}
     ]
   end
