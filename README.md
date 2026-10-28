@@ -126,9 +126,11 @@ Vulkan device (`NX_STEREO_DEVICE` selects devices by URI substring).
 
 ![Left image, ground truth and NxStereo disparity for four Middlebury scenes](docs/images/middlebury.webp)
 
-Left image, ground truth and `NxStereo.sgm/3` with 64 disparities and the
-default options, on the same colour scale; black pixels are unknown in the
-ground truth and unmatched in the output.
+The ground truth was measured with structured light; NxStereo
+(`NxStereo.sgm/3`, 64 disparities, default options) only sees the two
+photos, so it loses detail at object edges, in structures thinner than its
+9x7 window and on blank or repetitive surfaces, and leaves the left border
+and occluded pixels without a value.
 The scenes are Teddy and Cones from the Middlebury 2003 datasets, and
 Adirondack and Motorcycle from the 2014 datasets at quarter resolution:
 
