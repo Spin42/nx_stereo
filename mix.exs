@@ -24,7 +24,7 @@ defmodule NxStereo.MixProject do
     [
       {:nx, "~> 1.0"},
       {:nx_iree, github: "mlainez/nx_iree", optional: true},
-      {:exla, "~> 1.0", only: :test}
+      {:exla, "~> 1.0", only: [:dev, :test]}
     ]
   end
 end

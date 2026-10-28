@@ -122,6 +122,15 @@ SPIR-V in `priv/spirv` is compiled once per stage and disparity range;
 `mix test --include vulkan` also compares the shaders with it on every
 Vulkan device (`NX_STEREO_DEVICE` selects devices by URI substring).
 
+## Benchmark
+
+`mix run bench/datasets.exs` downloads the Middlebury MiddEval3 training
+scenes into `_build/bench` and reports, per scene, the share of pixels
+matched and of pixels more than 2 disparities off. On a Vulkan device it also
+counts the pixels where the shaders and the reference disagree, and times a
+frame. `--datasets middlebury,eth3d,kitti` adds ETH3D (needs `7z`) and KITTI
+2015 (1.7 GB); `--device` selects a Vulkan device by URI substring.
+
 ## Examples
 
 ![Left image, ground truth and NxStereo disparity for four Middlebury scenes](docs/images/middlebury-examples.webp)
