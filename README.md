@@ -13,28 +13,6 @@ aggregation paths with the normalized recurrence, winner selection with a
 uniqueness check and parabolic subpixel refinement, OpenCV's left-right
 consistency check and a 3x3 median.
 
-## Examples
-
-![Left image, ground truth and NxStereo disparity for four Middlebury scenes](docs/images/middlebury.webp)
-
-Left image, ground truth and `NxStereo.sgm/3` with 64 disparities and the
-default options, on the same colour scale; black pixels are unknown in the
-ground truth and unmatched in the output.
-The scenes are Teddy and Cones from the Middlebury 2003 datasets, and
-Adirondack and Motorcycle from the 2014 datasets at quarter resolution:
-
-| Scene | Pixels matched | Matched pixels off by more than 2 px |
-| --- | --- | --- |
-| Teddy | 92% | 6.4% |
-| Cones | 91% | 5.5% |
-| Adirondack | 94% | 5.5% |
-| Motorcycle | 94% | 7.5% |
-
-The images come from the [Middlebury stereo datasets](https://vision.middlebury.edu/stereo/data/):
-D. Scharstein and R. Szeliski, *High-accuracy stereo depth maps using
-structured light*, CVPR 2003; D. Scharstein et al., *High-resolution stereo
-datasets with subpixel-accurate ground truth*, GCPR 2014.
-
 ## What runs where
 
 `NxStereo.sgm/3` is plain Nx. How it runs depends on the compiler that calls
@@ -143,3 +121,25 @@ SPIR-V in `priv/spirv` is compiled once per stage and disparity range;
 `mix test` checks the reference implementation on EXLA and Nx's evaluator.
 `mix test --include vulkan` also compares the shaders with it on every
 Vulkan device (`NX_STEREO_DEVICE` selects devices by URI substring).
+
+## Examples
+
+![Left image, ground truth and NxStereo disparity for four Middlebury scenes](docs/images/middlebury.webp)
+
+Left image, ground truth and `NxStereo.sgm/3` with 64 disparities and the
+default options, on the same colour scale; black pixels are unknown in the
+ground truth and unmatched in the output.
+The scenes are Teddy and Cones from the Middlebury 2003 datasets, and
+Adirondack and Motorcycle from the 2014 datasets at quarter resolution:
+
+| Scene | Pixels matched | Matched pixels off by more than 2 px |
+| --- | --- | --- |
+| Teddy | 92% | 6.4% |
+| Cones | 91% | 5.5% |
+| Adirondack | 94% | 5.5% |
+| Motorcycle | 94% | 7.5% |
+
+The images come from the [Middlebury stereo datasets](https://vision.middlebury.edu/stereo/data/):
+D. Scharstein and R. Szeliski, *High-accuracy stereo depth maps using
+structured light*, CVPR 2003; D. Scharstein et al., *High-resolution stereo
+datasets with subpixel-accurate ground truth*, GCPR 2014.
