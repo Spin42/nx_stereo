@@ -10,9 +10,12 @@ disparity = NxStereo.sgm(left, right, disparities: 64, p1: 8, p2: 64)
 an `f32` disparity map with `-1.0` where no reliable match was found. The
 algorithm follows libSGM: a 9x7 Census transform that ignores one-level
 differences, so that sensor noise on dark or flat surfaces does not count as
-texture, Hamming costs, three aggregation paths with the normalized
+texture, Hamming costs, eight aggregation paths with the normalized
 recurrence, winner selection with a uniqueness check and parabolic subpixel
 refinement, OpenCV's left-right consistency check and a 3x3 median.
+`paths: 3` keeps only the horizontal and top-to-bottom paths, which takes
+about half the GPU time and leaves more pixels wrong, mostly on dark or
+textureless surfaces.
 
 `:disparities` is 64 or 128, and images are at most 4096 pixels wide. When
 nearby objects shift by more than 128 pixels between the two images, run on
@@ -117,9 +120,10 @@ for both, and for cross-compiling with Nerves.
 The GLSL sources in `shaders/` are ported from
 [Fixstars libSGM](https://github.com/fixstars/libSGM) (Apache-2.0) and
 OpenCV's StereoSGBM consistency rules (BSD-3-Clause, see `OPENCV-LICENSE`).
-The six stages are the Census transform, the forward, reverse and vertical
-cost scans (the last one also selects the winners), the consistency check and
-the median. Image size and penalties are specialization constants, so the
+The stages are the Census transform, the forward and reverse horizontal
+cost scans, with 8 paths the bottom-to-top and diagonal scans, the
+top-to-bottom scan (which also selects the winners), the consistency check
+and the median. Image size and penalties are specialization constants, so the
 SPIR-V in `priv/spirv` is compiled once per stage and disparity range;
 `mix nx_stereo.shaders` regenerates it with `glslangValidator`.
 
@@ -136,7 +140,8 @@ scenes into `_build/bench` and reports, per scene, the share of pixels
 matched and of pixels more than 2 disparities off. On a Vulkan device it also
 counts the pixels where the shaders and the reference disagree, and times a
 frame. `--datasets middlebury,eth3d,kitti` adds ETH3D (needs `7z`) and KITTI
-2015 (1.7 GB); `--device` selects a Vulkan device by URI substring.
+2015 (1.7 GB); `--paths 3` measures the faster mode; `--device` selects a
+Vulkan device by URI substring.
 
 ## Examples
 
@@ -152,10 +157,10 @@ Adirondack and Motorcycle from the 2014 datasets at quarter resolution:
 
 | Scene | Pixels matched | Matched pixels off by more than 2 px |
 | --- | --- | --- |
-| Teddy | 92% | 6.6% |
-| Cones | 91% | 5.5% |
-| Adirondack | 94% | 6.1% |
-| Motorcycle | 94% | 7.7% |
+| Teddy | 91% | 7.7% |
+| Cones | 91% | 5.7% |
+| Adirondack | 94% | 5.7% |
+| Motorcycle | 94% | 7.9% |
 
 The images come from the [Middlebury stereo datasets](https://vision.middlebury.edu/stereo/data/):
 D. Scharstein and R. Szeliski, *High-accuracy stereo depth maps using

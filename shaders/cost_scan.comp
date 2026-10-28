@@ -6,7 +6,7 @@
 // Copyright 2016 Fixstars Corporation
 // SPDX-License-Identifier: Apache-2.0
 // Scans over the stored matching costs: the reverse horizontal path, or the
-// vertical path fused with selection.
+// top-to-bottom path fused with selection over 3 or 8 (PATHS) paths.
 layout(local_size_x = 128) in;
 // Image size and penalties are specialization constants; the disparity
 // range and lane layout stay compile-time macros.
@@ -16,12 +16,25 @@ layout(constant_id = 2) const int P1 = 8;
 layout(constant_id = 3) const int P2 = 64;
 layout(constant_id = 4) const float UNIQUENESS = 1.0526315789473684;
 #include "cost_dp.glsl"
+#ifndef PATHS
+#define PATHS 3
+#endif
 layout(set = 0, binding = 0) readonly buffer Costs { PATH_WORD_TYPE cost_words[]; };
 #if FUSE_VERTICAL
 layout(set = 0, binding = 1) readonly buffer Forward { PATH_WORD_TYPE paths_forward[]; };
 layout(set = 0, binding = 2) readonly buffer Reverse { PATH_WORD_TYPE paths_reverse[]; };
-layout(set = 0, binding = 3) writeonly buffer LeftDisparity { float left_disparity[]; };
-layout(set = 0, binding = 4) writeonly buffer Winners { uint winners[]; };
+#if PATHS == 8
+layout(set = 0, binding = 3) readonly buffer Up { PATH_WORD_TYPE paths_up[]; };
+layout(set = 0, binding = 4) readonly buffer DownRight { PATH_WORD_TYPE paths_down_right[]; };
+layout(set = 0, binding = 5) readonly buffer DownLeft { PATH_WORD_TYPE paths_down_left[]; };
+layout(set = 0, binding = 6) readonly buffer UpRight { PATH_WORD_TYPE paths_up_right[]; };
+layout(set = 0, binding = 7) readonly buffer UpLeft { PATH_WORD_TYPE paths_up_left[]; };
+#define OUTPUT_BINDING 8
+#else
+#define OUTPUT_BINDING 3
+#endif
+layout(set = 0, binding = OUTPUT_BINDING) writeonly buffer LeftDisparity { float left_disparity[]; };
+layout(set = 0, binding = OUTPUT_BINDING + 1) writeonly buffer Winners { uint winners[]; };
 #include "cost_select.glsl"
 #else
 layout(set = 0, binding = 1) writeonly buffer Paths { PATH_WORD_TYPE paths[]; };

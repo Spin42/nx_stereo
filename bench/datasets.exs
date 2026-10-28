@@ -2,7 +2,7 @@
 # Vulkan device, how the shaders agree with the reference and their time per
 # frame. Datasets are downloaded into _build/bench.
 #
-#     mix run bench/datasets.exs [--datasets middlebury,eth3d,kitti] [--device URI_SUBSTRING]
+#     mix run bench/datasets.exs [--datasets middlebury,eth3d,kitti] [--paths 3|8] [--device URI_SUBSTRING]
 #
 #   * middlebury (default): the 15 MiddEval3 training scenes at quarter
 #     resolution, non-occluded pixels, 45 MB.
@@ -267,7 +267,9 @@ end
 
 defmodule Bench do
   def run(args) do
-    {opts, _} = OptionParser.parse!(args, strict: [datasets: :string, device: :string])
+    {opts, _} =
+      OptionParser.parse!(args, strict: [datasets: :string, device: :string, paths: :integer])
+
     Nx.default_backend(EXLA.Backend)
     device = device(opts[:device])
 
@@ -288,7 +290,7 @@ defmodule Bench do
     rows =
       for dataset <- datasets,
           {scene, left, right, gt} <- apply(Bench.Datasets, String.to_atom(dataset), []),
-          row = scene_row(dataset, scene, left, right, gt, device),
+          row = scene_row(dataset, scene, left, right, gt, device, Keyword.get(opts, :paths, 8)),
           row != nil,
           do: row
 
@@ -315,7 +317,7 @@ defmodule Bench do
     print([["dataset", "", "matched", "bad", "bad or missing"] | summary])
   end
 
-  defp scene_row(dataset, scene, left, right, gt, device) do
+  defp scene_row(dataset, scene, left, right, gt, device, paths) do
     {h, w} = Nx.shape(left)
     top = gt |> Nx.reduce_max() |> Nx.to_number()
 
@@ -330,7 +332,7 @@ defmodule Bench do
       IO.puts("skipping #{dataset} #{scene}: ground truth reaches #{round(top)} disparities")
       nil
     else
-      fun = &NxStereo.sgm(&1, &2, disparities: disparities)
+      fun = &NxStereo.sgm(&1, &2, disparities: disparities, paths: paths)
       reference = Nx.Defn.jit(fun, compiler: EXLA).(left, right)
       metrics = score(reference, gt)
 

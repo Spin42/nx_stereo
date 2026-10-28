@@ -1,0 +1,44 @@
+#version 450
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_KHR_shader_subgroup_shuffle_relative : require
+#extension GL_GOOGLE_include_directive : require
+// Copyright 2016 Fixstars Corporation
+// SPDX-License-Identifier: Apache-2.0
+// A bottom-to-top or diagonal scan over the stored matching costs. Rows are
+// visited downwards (STEP_Y = 1) or upwards (STEP_Y = -1) and the path moves
+// STEP_X columns per row, so line l covers column l (STEP_X = 0),
+// l - (HEIGHT - 1) + i (STEP_X = 1) or l - i (STEP_X = -1) at step i. A
+// diagonal line keeps a zero path until it enters the image.
+layout(local_size_x = 128) in;
+// Image size and penalties are specialization constants; the disparity
+// range and lane layout stay compile-time macros.
+layout(constant_id = 0) const int WIDTH = 640;
+layout(constant_id = 1) const int HEIGHT = 480;
+layout(constant_id = 2) const int P1 = 8;
+layout(constant_id = 3) const int P2 = 64;
+layout(constant_id = 4) const float UNIQUENESS = 1.0526315789473684;
+#include "cost_dp.glsl"
+layout(set = 0, binding = 0) readonly buffer Costs { PATH_WORD_TYPE cost_words[]; };
+layout(set = 0, binding = 1) writeonly buffer Paths { PATH_WORD_TYPE paths[]; };
+void main() {
+  uint lane = gl_SubgroupInvocationID % LANES;
+  uint base = gl_SubgroupInvocationID - lane;
+  LaneGeometry g = lane_geometry(lane, base);
+  int line = int(gl_WorkGroupID.x) * LINES + int(gl_LocalInvocationID.x) / LANES;
+  if (line >= (STEP_X == 0 ? WIDTH : WIDTH + HEIGHT - 1)) return;
+  uint previous[BLOCK];
+  for (int k = 0; k < BLOCK; ++k) previous[k] = 0;
+  uint last_min = 0;
+  for (int i = 0; i < HEIGHT; ++i) {
+    int y = STEP_Y > 0 ? i : HEIGHT - 1 - i;
+    int x = STEP_X > 0 ? line - (HEIGHT - 1) + i : (STEP_X < 0 ? line - i : line);
+    // Whole lane groups share a line, so shuffles only read active lanes.
+    if (x < 0 || x >= WIDTH) continue;
+    int word = volume_word(x, y, lane);
+    uint costs[BLOCK];
+    for (int k = 0; k < BLOCK; k += PATH_PACK) unpack_lane(cost_words[word + k / PATH_PACK], costs, k);
+    update_path(costs, previous, last_min, g);
+    for (int k = 0; k < BLOCK; k += PATH_PACK) paths[word + k / PATH_PACK] = pack_lane(previous, k);
+  }
+}

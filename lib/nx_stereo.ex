@@ -4,14 +4,14 @@ defmodule NxStereo do
 
   `sgm/3` computes a disparity map from a rectified pair of grayscale
   images with semi-global matching: a 9x7 Census transform that ignores
-  one-level differences, Hamming matching costs, aggregation along three
-  paths (left to right, right to left and top to bottom) with libSGM's
-  normalized recurrence, winner selection with a uniqueness check and
-  parabolic subpixel refinement, OpenCV's left-right consistency check, and
-  a 3x3 median filter.
+  one-level differences, Hamming matching costs, aggregation along eight
+  paths (the horizontal, vertical and diagonal directions), or three with
+  `paths: 3`, with libSGM's normalized recurrence, winner selection with a
+  uniqueness check and parabolic subpixel refinement, OpenCV's left-right
+  consistency check, and a 3x3 median filter.
 
   It is written in `Nx.Defn` and runs on every Nx backend and compiler.
-  Compiled by `NxIREE.Compiler` for Vulkan, it runs as six compute shaders
+  Compiled by `NxIREE.Compiler` for Vulkan, it runs as compute shaders
   ported from Fixstars' libSGM instead, with the same matches; subpixel
   values may differ in their last bit, as GPU division need not be
   correctly rounded.
@@ -44,12 +44,23 @@ defmodule NxStereo do
     * `:uniqueness` - a match is kept when the second-best cost, ignoring
       the disparities next to the best one, exceeds the best cost times this
       factor. Defaults to 1.0526 (OpenCV's `uniquenessRatio` of 5).
+    * `:paths` - the number of aggregation paths: 3 (left to right, right to
+      left and top to bottom) or 8 (also bottom to top and the four
+      diagonals), which is more accurate and slower. Defaults to 8.
 
   Images must be more than 8 pixels wide, more than 6 high, and at most 4096
   wide.
   """
   deftransform sgm(left, right, opts \\ []) do
-    opts = Keyword.validate!(opts, disparities: 64, p1: 8, p2: 64, uniqueness: 1.0526315789473684)
+    opts =
+      Keyword.validate!(opts,
+        disparities: 64,
+        p1: 8,
+        p2: 64,
+        uniqueness: 1.0526315789473684,
+        paths: 8
+      )
+
     config = config!(left, right, opts)
     left = Nx.as_type(left, :s32)
     right = Nx.as_type(right, :s32)
@@ -93,7 +104,7 @@ defmodule NxStereo do
     unless disparities in [64, 128],
       do: raise(ArgumentError, ":disparities must be 64 or 128, got #{inspect(disparities)}")
 
-    # The shaders sum both horizontal paths bytewise, so each stays below 128
+    # The shaders sum pairs of paths bytewise, so each stays below 128
     unless is_integer(p1) and is_integer(p2) and p1 >= 0 and p1 < p2 and p2 + @census_bound <= 127 do
       raise ArgumentError,
             "expected integers 0 <= :p1 < :p2 <= #{127 - @census_bound}, got #{inspect({p1, p2})}"
@@ -104,13 +115,17 @@ defmodule NxStereo do
             ":uniqueness must be a number of at least 1.0, got #{inspect(uniqueness)}"
     end
 
+    unless opts[:paths] in [3, 8],
+      do: raise(ArgumentError, ":paths must be 3 or 8, got #{inspect(opts[:paths])}")
+
     %{
       height: height,
       width: width,
       disparities: disparities,
       p1: p1,
       p2: p2,
-      uniqueness: uniqueness * 1.0
+      uniqueness: uniqueness * 1.0,
+      paths: opts[:paths]
     }
   end
 
@@ -119,10 +134,7 @@ defmodule NxStereo do
   defnp sgm_n(left, right, opts) do
     disparities = opts[:disparities]
     costs = matching_costs(census(left), census(right), disparities)
-    forward = scan_x(costs, opts)
-    reverse = costs |> Nx.reverse(axes: [1]) |> scan_x(opts) |> Nx.reverse(axes: [1])
-    vertical = scan_y(costs, opts)
-    {disparity, keys} = select(forward + reverse + vertical, opts)
+    {disparity, keys} = select(aggregate(costs, opts), opts)
     disparity |> consistency(keys, disparities) |> median()
   end
 
@@ -169,13 +181,40 @@ defmodule NxStereo do
     left |> Nx.new_axis(2) |> Nx.bitwise_xor(shifted) |> Nx.population_count() |> Nx.as_type(:s32)
   end
 
-  defnp scan_x(costs, opts) do
-    costs |> Nx.transpose(axes: [1, 0, 2]) |> scan(opts) |> Nx.transpose(axes: [1, 0, 2])
+  # The sum of the path costs along every aggregation direction
+  deftransformp aggregate(costs, opts) do
+    down = fn shift -> scan(costs, Keyword.put(opts, :shift, shift)) end
+
+    up = fn shift ->
+      costs
+      |> Nx.reverse(axes: [0])
+      |> scan(Keyword.put(opts, :shift, shift))
+      |> Nx.reverse(axes: [0])
+    end
+
+    rows = Nx.transpose(costs, axes: [1, 0, 2])
+
+    horizontal = [
+      rows |> scan(opts) |> Nx.transpose(axes: [1, 0, 2]),
+      rows
+      |> Nx.reverse(axes: [0])
+      |> scan(opts)
+      |> Nx.reverse(axes: [0])
+      |> Nx.transpose(axes: [1, 0, 2])
+    ]
+
+    paths =
+      case opts[:paths] do
+        3 -> horizontal ++ [down.(0)]
+        8 -> horizontal ++ [down.(0), up.(0), down.(1), down.(-1), up.(1), up.(-1)]
+      end
+
+    Enum.reduce(paths, &Nx.add/2)
   end
 
-  defnp(scan_y(costs, opts), do: scan(costs, opts))
-
-  # libSGM's normalized path recurrence along the first axis
+  # libSGM's normalized path recurrence along the first axis. With `:shift`
+  # of 1 or -1 the path also moves one step along the second axis per step,
+  # following a diagonal; it starts from zero where it enters the image.
   defnp scan(costs, opts) do
     p1 = opts[:p1]
     p2 = opts[:p2]
@@ -185,6 +224,7 @@ defmodule NxStereo do
 
     {_previous, paths, _costs} =
       while {previous, paths, costs}, i <- 0..(steps - 1) do
+        previous = follow(previous, opts[:shift])
         a = previous - Nx.reduce_min(previous, axes: [1], keep_axes: true)
         lower = Nx.pad(a, p2 - p1, [{0, 0, 0}, {1, -1, 0}])
         upper = Nx.pad(a, p2 - p1, [{0, 0, 0}, {-1, 1, 0}])
@@ -194,6 +234,15 @@ defmodule NxStereo do
       end
 
     paths
+  end
+
+  # Moves the path state of each line to the line it continues on
+  deftransformp follow(previous, shift) do
+    case shift do
+      s when s in [nil, 0] -> previous
+      1 -> Nx.pad(previous, 0, [{1, -1, 0}, {0, 0, 0}])
+      -1 -> Nx.pad(previous, 0, [{-1, 1, 0}, {0, 0, 0}])
+    end
   end
 
   # Winner, uniqueness check and subpixel refinement, as the shaders compute

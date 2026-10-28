@@ -1,8 +1,8 @@
 // Copyright 2016 Fixstars Corporation
 // SPDX-License-Identifier: Apache-2.0
-// Selects from the register-held vertical path plus both stored horizontal
-// paths, as in select_path.glsl, with the same winner, uniqueness, subpixel
-// and winner-key outputs.
+// Selects from the register-held vertical path plus the stored paths, as in
+// select_path.glsl, with the same winner, uniqueness, subpixel and
+// winner-key outputs.
 struct SelectGeometry {
   int x;
   uint lane_disparity;
@@ -20,7 +20,7 @@ SelectGeometry select_geometry(int x, uint lane, uint base) {
   for (int k = 0; k < BLOCK; ++k) s.pad[k] = int(lane) * BLOCK + k <= x ? 0u : 0x8000u;
   return s;
 }
-// Both horizontal bytes stay below 128, so their packed sum has no carries.
+// Path bytes stay below 128, so the packed sum of two has no carries.
 PATH_WORD_TYPE add_words(PATH_WORD_TYPE a, PATH_WORD_TYPE b) { return a + b; }
 uint pick(uint values[BLOCK], uint index) {
   uint t[BLOCK];
@@ -31,16 +31,28 @@ uint pick(uint values[BLOCK], uint index) {
   for (int i = 0; i < 2; ++i) t[i] = high2 ? t[i + 2] : t[i];
   return (index & 1u) != 0u ? t[1] : t[0];
 }
-void select_sum(uint vertical[BLOCK], int pixel, uint horizontal[BLOCK], SelectGeometry s);
-void select_pixel(uint vertical[BLOCK], int pixel, int word, SelectGeometry s) {
-  uint horizontal[BLOCK];
-  for (int k = 0; k < BLOCK; k += PATH_PACK)
-    unpack_lane(add_words(paths_forward[word + k / PATH_PACK], paths_reverse[word + k / PATH_PACK]), horizontal, k);
-  select_sum(vertical, pixel, horizontal, s);
+void select_sum(uint vertical[BLOCK], int pixel, uint stored[BLOCK], SelectGeometry s);
+void add_pair(inout uint stored[BLOCK], PATH_WORD_TYPE a, PATH_WORD_TYPE b, int first) {
+  uint pair[BLOCK];
+  unpack_lane(add_words(a, b), pair, first);
+  for (int k = first; k < first + PATH_PACK; ++k) stored[k] += pair[k];
 }
-void select_sum(uint vertical[BLOCK], int pixel, uint horizontal[BLOCK], SelectGeometry s) {
+void select_pixel(uint vertical[BLOCK], int pixel, int word, SelectGeometry s) {
+  uint stored[BLOCK];
+  for (int k = 0; k < BLOCK; k += PATH_PACK) {
+    int w = word + k / PATH_PACK;
+    unpack_lane(add_words(paths_forward[w], paths_reverse[w]), stored, k);
+#if PATHS == 8
+    add_pair(stored, paths_up[w], paths_down_right[w], k);
+    add_pair(stored, paths_down_left[w], paths_up_right[w], k);
+    add_pair(stored, paths_up_left[w], PATH_WORD_TYPE(0), k);
+#endif
+  }
+  select_sum(vertical, pixel, stored, s);
+}
+void select_sum(uint vertical[BLOCK], int pixel, uint stored[BLOCK], SelectGeometry s) {
   uint values[BLOCK];
-  for (int k = 0; k < BLOCK; ++k) values[k] = vertical[k] + horizontal[k] + s.pad[k];
+  for (int k = 0; k < BLOCK; ++k) values[k] = vertical[k] + stored[k] + s.pad[k];
   uint best = 0xffffffffu;
   for (int k = 0; k < BLOCK; ++k) best = min(best, (values[k] << 16) | (s.lane_disparity + uint(k)));
   best = group_min(best);

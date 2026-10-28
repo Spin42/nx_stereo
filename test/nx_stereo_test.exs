@@ -105,6 +105,10 @@ defmodule NxStereoTest do
     assert_raise ArgumentError, ~r/:uniqueness/, fn ->
       NxStereo.sgm(left, right, uniqueness: 0.5)
     end
+
+    assert_raise ArgumentError, ~r/:paths must be 3 or 8/, fn ->
+      NxStereo.sgm(left, right, paths: 4)
+    end
   end
 
   describe "on Vulkan through NxIREE" do
@@ -121,8 +125,9 @@ defmodule NxStereoTest do
     end
 
     for {height, width, disparities} <- [{24, 160, 64}, {37, 203, 128}],
-        scene <- [:shifted, :layered] do
-      test "the shaders match the reference on a #{scene} scene at #{height}x#{width}, #{disparities} disparities",
+        scene <- [:shifted, :layered],
+        paths <- [3, 8] do
+      test "the shaders match the reference with #{paths} paths on a #{scene} scene at #{height}x#{width}, #{disparities} disparities",
            %{devices: devices} do
         {left, right} =
           case unquote(scene) do
@@ -130,7 +135,13 @@ defmodule NxStereoTest do
             :layered -> layered(unquote(height), unquote(width), 4.5, 14.25)
           end
 
-        opts = [disparities: unquote(disparities), p1: 7, p2: 70, uniqueness: 1.05]
+        opts = [
+          disparities: unquote(disparities),
+          p1: 7,
+          p2: 70,
+          uniqueness: 1.05,
+          paths: unquote(paths)
+        ]
 
         reference =
           Nx.Defn.jit(&NxStereo.sgm(&1, &2, opts), compiler: EXLA).(left, right)
