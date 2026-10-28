@@ -13,6 +13,10 @@ aggregation paths with the normalized recurrence, winner selection with a
 uniqueness check and parabolic subpixel refinement, OpenCV's left-right
 consistency check and a 3x3 median.
 
+`:disparities` is 64 or 128, and images are at most 4096 pixels wide. When
+nearby objects shift by more than 128 pixels between the two images, run on
+downscaled images.
+
 ## What runs where
 
 `NxStereo.sgm/3` is plain Nx. How it runs depends on the compiler that calls
