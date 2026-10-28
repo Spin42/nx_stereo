@@ -41,9 +41,9 @@ The libraries play these roles:
 ```elixir
 def deps do
   [
-    {:nx_stereo, github: "mlainez/nx_stereo"},
+    {:nx_stereo, github: "Spin42/nx_stereo"},
     # for Vulkan GPUs; NxStereo falls back to plain Nx without it
-    {:nx_iree, github: "mlainez/nx_iree"},
+    {:nx_iree, github: "Spin42/nx_iree"},
     # only where functions are compiled
     {:exla, "~> 1.0"}
   ]
