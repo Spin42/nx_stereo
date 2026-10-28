@@ -19,6 +19,7 @@ defmodule NxStereo do
   import Nx.Defn
 
   @census_bound 48
+  # Use as Nx.u32(@invalid_key): defn narrows untyped literals to s32
   @invalid_key 0xFFFFFFFF
 
   @doc """
@@ -253,10 +254,10 @@ defmodule NxStereo do
         |> Nx.slice_along_axis(d, width, axis: 1)
 
       matches =
-        Nx.not_equal(shifted, @invalid_key)
+        Nx.not_equal(shifted, Nx.u32(@invalid_key))
         |> Nx.logical_and(Nx.equal(Nx.bitwise_and(shifted, 0xFFFF), d))
 
-      candidate = Nx.bitwise_or(Nx.bitwise_and(shifted, 0xFFFF0000), 65_535 - d)
+      candidate = Nx.bitwise_or(Nx.bitwise_and(shifted, Nx.u32(0xFFFF0000)), 65_535 - d)
       Nx.select(matches, candidate, Nx.u32(@invalid_key))
     end
     |> Nx.stack(axis: 2)
@@ -268,7 +269,7 @@ defmodule NxStereo do
     inside = rx >= 0 and rx < width
     match = Nx.take_along_axis(right, Nx.clip(rx, 0, width - 1), axis: 1)
     right_d = 65_535 - Nx.as_type(Nx.bitwise_and(match, 0xFFFF), :s32)
-    inside and match != @invalid_key and Nx.abs(right_d - d) > 1
+    inside and match != Nx.u32(@invalid_key) and Nx.abs(right_d - d) > 1
   end
 
   # 3x3 median with replicated borders
