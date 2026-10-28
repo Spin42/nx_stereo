@@ -12,10 +12,8 @@ algorithm follows libSGM: a 9x7 Census transform that ignores one-level
 differences, so that sensor noise on dark or flat surfaces does not count as
 texture, Hamming costs, eight aggregation paths with the normalized
 recurrence, winner selection with a uniqueness check and parabolic subpixel
-refinement, OpenCV's left-right consistency check and a 3x3 median.
-`paths: 3` keeps only the horizontal and top-to-bottom paths, which takes
-about half the GPU time and leaves more pixels wrong, mostly on dark or
-textureless surfaces.
+refinement, OpenCV's left-right consistency check and a 3x3 median. For
+faster frames, see [Speed or accuracy](#speed-or-accuracy).
 
 `:disparities` is 64 or 128, and images are at most 4096 pixels wide. When
 nearby objects shift by more than 128 pixels between the two images, run on
@@ -88,6 +86,25 @@ disparity = sgm.(left, right)
 
 The GPU needs Vulkan 1.1 with subgroup shuffles and a subgroup size of at
 least 8 for 64 disparities or 16 for 128.
+
+### Speed or accuracy
+
+`NxStereo.sgm/3` aggregates along 8 paths by default. `paths: 3` keeps only
+the horizontal and top-to-bottom paths, for about half the GPU time per
+frame. In the `Nx.Defn.jit/2` call above, pass:
+
+```elixir
+&NxStereo.sgm(&1, &2, disparities: 64, paths: 3)
+```
+
+It leaves more pixels wrong or missing, mostly on dark or textureless
+surfaces. On the [benchmark](#benchmark):
+
+| Pixels wrong or missing | 8 paths (default) | 3 paths |
+| --- | --- | --- |
+| Middlebury | 12.4% | 13.0% |
+| ETH3D | 8.7% | 11.4% |
+| KITTI | 6.4% | 7.1% |
 
 ## Running on a device without the compiler
 
