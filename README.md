@@ -52,7 +52,9 @@ end
 
 `nx_iree` is an optional dependency of `nx_stereo`, so it must be listed
 explicitly. Its first build compiles the IREE runtime and needs `git`,
-`cmake`, `ninja` and a C++17 compiler.
+`cmake`, `ninja` and a C++17 compiler. NxIREE detects EXLA when it is
+compiled: after adding `exla` to a project where `nx_iree` is already built,
+run `mix deps.compile nx_iree --force`, or compiling for Vulkan fails.
 
 ## Running on a GPU
 
