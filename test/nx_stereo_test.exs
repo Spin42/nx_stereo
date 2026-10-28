@@ -146,12 +146,14 @@ defmodule NxStereoTest do
             |> Nx.to_flat_list()
 
           # GLSL's f32 division need not be correctly rounded, so subpixel
-          # values may differ in the last bit; every decision must agree.
+          # values may differ in the last bit (here, at most two ulps); every
+          # decision must agree.
           mismatches =
             Enum.zip(gpu, reference)
             |> Enum.with_index()
             |> Enum.reject(fn {{a, b}, _} ->
-              a == -1.0 == (b == -1.0) and trunc(a) == trunc(b) and abs(a - b) <= 1.0e-6
+              a == -1.0 == (b == -1.0) and trunc(a) == trunc(b) and
+                abs(a - b) <= 2.4e-7 * max(abs(b), 1.0)
             end)
 
           assert mismatches == [],
