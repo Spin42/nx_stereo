@@ -124,7 +124,7 @@ Vulkan device (`NX_STEREO_DEVICE` selects devices by URI substring).
 
 ## Examples
 
-![Left image, ground truth and NxStereo disparity for four Middlebury scenes](docs/images/middlebury.webp)
+![Left image, ground truth and NxStereo disparity for four Middlebury scenes](docs/images/middlebury-examples.webp)
 
 The ground truth was measured with structured light; NxStereo
 (`NxStereo.sgm/3`, 64 disparities, default options) only sees the two
