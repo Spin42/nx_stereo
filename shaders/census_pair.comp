@@ -27,9 +27,10 @@ layout(set = 0, binding = 2) writeonly buffer Features { FEATURE_PAIR features[]
 // An odd row stride keeps the sixteen rows of a warp in distinct banks.
 #define STRIDE (WINDOW_COLUMNS + 1)
 // One shared word holds both images of a pixel in 16-bit lanes, each offset by
-// 0x100. Subtracting the unoffset centre word then yields, without borrows
-// between lanes, bit 8 (left) and bit 24 (right) set exactly when the
-// neighbour is not below the centre. Chunks accumulate those complemented
+// 0x100. Subtracting the unoffset centre word, lowered by one level and
+// clamped at zero in each lane, then yields, without borrows between lanes,
+// bit 8 (left) and bit 24 (right) set exactly when the neighbour is not more
+// than one level below the centre. Chunks accumulate those complemented
 // Census bits and are inverted once at the end.
 #define LANE_OFFSET 0x01000100u
 #define COMPARE_MASK 0x01000100u
@@ -57,7 +58,8 @@ void main() {
   int y = y0 + row;
   if (y >= HEIGHT) break;
   int centre = (row + 3) * STRIDE + column + 4;
-  uint a = rows[centre] - LANE_OFFSET;
+  uint c = rows[centre] - LANE_OFFSET;
+  uint a = (max(c & 0xffffu, 1u) - 1u) | ((max(c >> 16, 1u) - 1u) << 16);
   int index = ((y0 / FEATURE_TILE + j) * WIDTH + x) * FEATURE_TILE + row0;
   uint chunk0 = 0u, chunk1 = 0u, chunk2 = 0u;
     chunk2 |= ((rows[centre + (-3 * STRIDE + -4)] - a) & COMPARE_MASK) << 7;

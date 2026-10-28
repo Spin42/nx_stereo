@@ -8,10 +8,11 @@ disparity = NxStereo.sgm(left, right, disparities: 64, p1: 8, p2: 64)
 
 `left` and `right` are rectified `{height, width}` `u8` images; the result is
 an `f32` disparity map with `-1.0` where no reliable match was found. The
-algorithm is libSGM's: a 9x7 Census transform, Hamming costs, three
-aggregation paths with the normalized recurrence, winner selection with a
-uniqueness check and parabolic subpixel refinement, OpenCV's left-right
-consistency check and a 3x3 median.
+algorithm follows libSGM: a 9x7 Census transform that ignores one-level
+differences, so that sensor noise on dark or flat surfaces does not count as
+texture, Hamming costs, three aggregation paths with the normalized
+recurrence, winner selection with a uniqueness check and parabolic subpixel
+refinement, OpenCV's left-right consistency check and a 3x3 median.
 
 `:disparities` is 64 or 128, and images are at most 4096 pixels wide. When
 nearby objects shift by more than 128 pixels between the two images, run on
@@ -151,10 +152,10 @@ Adirondack and Motorcycle from the 2014 datasets at quarter resolution:
 
 | Scene | Pixels matched | Matched pixels off by more than 2 px |
 | --- | --- | --- |
-| Teddy | 92% | 6.4% |
+| Teddy | 92% | 6.6% |
 | Cones | 91% | 5.5% |
-| Adirondack | 94% | 5.5% |
-| Motorcycle | 94% | 7.5% |
+| Adirondack | 94% | 6.1% |
+| Motorcycle | 94% | 7.7% |
 
 The images come from the [Middlebury stereo datasets](https://vision.middlebury.edu/stereo/data/):
 D. Scharstein and R. Szeliski, *High-accuracy stereo depth maps using

@@ -3,11 +3,12 @@ defmodule NxStereo do
   Stereo matching for Nx.
 
   `sgm/3` computes a disparity map from a rectified pair of grayscale
-  images with semi-global matching: a 9x7 Census transform, Hamming matching
-  costs, aggregation along three paths (left to right, right to left and top
-  to bottom) with libSGM's normalized recurrence, winner selection with a
-  uniqueness check and parabolic subpixel refinement, OpenCV's left-right
-  consistency check, and a 3x3 median filter.
+  images with semi-global matching: a 9x7 Census transform that ignores
+  one-level differences, Hamming matching costs, aggregation along three
+  paths (left to right, right to left and top to bottom) with libSGM's
+  normalized recurrence, winner selection with a uniqueness check and
+  parabolic subpixel refinement, OpenCV's left-right consistency check, and
+  a 3x3 median filter.
 
   It is written in `Nx.Defn` and runs on every Nx backend and compiler.
   Compiled by `NxIREE.Compiler` for Vulkan, it runs as six compute shaders
@@ -126,15 +127,16 @@ defmodule NxStereo do
   end
 
   # 48 bits per pixel, one per neighbour of the 9x7 window outside the centre
-  # row and column, set where the neighbour is below the centre. Borders are
-  # replicated.
+  # row and column, set where the neighbour is more than one level below the
+  # centre, so that sensor noise on flat surfaces does not flip bits. Borders
+  # are replicated.
   deftransformp census(image) do
     centre = image
 
     neighbours()
     |> Enum.with_index()
     |> Enum.reduce(Nx.broadcast(Nx.u64(0), image), fn {{dy, dx}, bit}, acc ->
-      below = Nx.less(shift(image, dy, dx), centre) |> Nx.as_type(:u64)
+      below = Nx.less(Nx.add(shift(image, dy, dx), 1), centre) |> Nx.as_type(:u64)
       Nx.bitwise_or(acc, Nx.left_shift(below, bit))
     end)
   end
