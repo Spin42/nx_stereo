@@ -3,13 +3,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // libSGM's median selection network.
 layout(local_size_x = 128) in;
-// Image size and penalties are specialization constants; the disparity
+// Image size is a specialization constant; the disparity
 // range and lane layout stay compile-time macros.
 layout(constant_id = 0) const int WIDTH = 640;
 layout(constant_id = 1) const int HEIGHT = 480;
-layout(constant_id = 2) const int P1 = 8;
-layout(constant_id = 3) const int P2 = 64;
-layout(constant_id = 4) const float UNIQUENESS = 1.0526315789473684;
 layout(set = 0, binding = 0) readonly buffer Left { float left_disparity[]; };
 layout(set = 0, binding = 1) writeonly buffer Output { float disparity[]; };
 void swap_values(inout float a, inout float b) { float t = min(a,b); b = max(a,b); a = t; }

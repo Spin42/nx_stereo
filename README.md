@@ -151,8 +151,10 @@ OpenCV's StereoSGBM consistency rules (BSD-3-Clause, see `OPENCV-LICENSE`).
 The stages are the Census transform, the forward and reverse horizontal
 cost scans, with 8 paths the bottom-to-top and diagonal scans, the
 top-to-bottom scan (which also selects the winners), the consistency check
-and the median. Image size and penalties are specialization constants, so the
-SPIR-V in `priv/spirv` is compiled once per stage and disparity range;
+and the median. Image size is a specialization constant and the penalties a
+`{3}` f32 input of the cost stages, so the SPIR-V in `priv/spirv` is compiled
+once per stage and disparity range and the penalties change without a new
+pipeline;
 `mix nx_stereo.shaders` regenerates it with `glslangValidator`.
 
 ## Tests

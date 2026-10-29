@@ -27,7 +27,9 @@ defmodule Mix.Tasks.NxStereo.Shaders do
 
   @impl true
   def run(_args) do
-    compiler = System.find_executable("glslangValidator") || Mix.raise("glslangValidator not found")
+    compiler =
+      System.find_executable("glslangValidator") || Mix.raise("glslangValidator not found")
+
     File.mkdir_p!("priv/spirv")
 
     for disparities <- [64, 128], {stage, {source, flags}} <- @stages do
