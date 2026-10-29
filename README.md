@@ -19,6 +19,17 @@ faster frames, see [Speed or accuracy](#speed-or-accuracy).
 nearby objects shift by more than 128 pixels between the two images, run on
 downscaled images.
 
+## Around the matcher
+
+The steps before and after matching are Nx functions too, so a whole depth
+pipeline compiles into one function:
+
+  * `NxStereo.Rectify`: undistortion and rectification, as OpenCV's
+    `initUndistortRectifyMap` and `remap`, with the calibration as inputs.
+  * `NxStereo.Image`: area resizing, a 3x3 or 5x5 median and the turbo
+    colour map.
+  * `NxStereo.Depth`: metric depth and a point cloud from a disparity map.
+
 ## What runs where
 
 `NxStereo.sgm/3` is plain Nx. How it runs depends on the compiler that calls

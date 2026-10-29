@@ -135,7 +135,7 @@ defmodule NxStereo do
     disparities = opts[:disparities]
     costs = matching_costs(census(left), census(right), disparities)
     {disparity, keys} = select(aggregate(costs, opts), opts)
-    disparity |> consistency(keys, disparities) |> median()
+    disparity |> consistency(keys, disparities) |> NxStereo.Image.median(3)
   end
 
   # 48 bits per pixel, one per neighbour of the 9x7 window outside the centre
@@ -321,14 +321,5 @@ defmodule NxStereo do
     match = Nx.take_along_axis(right, Nx.clip(rx, 0, width - 1), axis: 1)
     right_d = 65_535 - Nx.as_type(Nx.bitwise_and(match, 0xFFFF), :s32)
     inside and match != Nx.u32(@invalid_key) and Nx.abs(right_d - d) > 1
-  end
-
-  # 3x3 median with replicated borders
-  deftransformp median(disparity) do
-    for(dy <- -1..1, dx <- -1..1, do: shift(disparity, dy, dx))
-    |> Nx.stack(axis: 2)
-    |> Nx.sort(axis: 2)
-    |> Nx.slice_along_axis(4, 1, axis: 2)
-    |> Nx.squeeze(axes: [2])
   end
 end
