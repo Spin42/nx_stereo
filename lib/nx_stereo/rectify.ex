@@ -10,6 +10,10 @@ defmodule NxStereo.Rectify do
 
       camera = NxStereo.Rectify.camera(k, d, r, p)
       rectified = NxStereo.Rectify.rectify(image, camera)
+
+  With `:size` smaller than the image, the calibration is the one scaled
+  to that size, and the image is shrunk in the same pass: a camera frame
+  goes to the matcher's size without a separate resize.
   """
   import Nx.Defn
 
@@ -48,10 +52,39 @@ defmodule NxStereo.Rectify do
   @doc """
   The rectified `u8` image: each pixel samples `image` bilinearly where
   the camera model maps it, with 0 outside the image.
+
+  ## Options
+
+    * `:size` - the rectified image's `{height, width}`, at most the
+      image's, which is the default. `camera` is the calibration at that
+      size. A smaller size shrinks the image in the same pass, with one
+      bilinear sample per pixel: faster on a GPU than a separate area
+      resize, at the cost of some aliasing of fine texture.
   """
-  defn rectify(image, camera) do
-    {map_x, map_y} = maps(image, camera)
-    remap(image, map_x, map_y)
+  deftransform rectify(image, camera, opts \\ []) do
+    {height, width} = size = Keyword.get(opts, :size, Nx.shape(image))
+    {in_height, in_width} = Nx.shape(image)
+
+    if height > in_height or width > in_width do
+      raise ArgumentError,
+            "rectify/3 only shrinks, got #{in_height}x#{in_width} to #{height}x#{width}"
+    end
+
+    rectify_n(image, camera, size: size, scale: {in_width / width, in_height / height})
+  end
+
+  defnp rectify_n(image, camera, opts) do
+    {map_x, map_y} = project(pixel_grid(opts[:size]), camera)
+    {scale_x, scale_y} = opts[:scale]
+    # Pixel centres line up, as in OpenCV's resize.
+    source_x = (map_x + 0.5) * scale_x - 0.5
+    source_y = (map_y + 0.5) * scale_y - 0.5
+
+    image
+    |> bilinear(source_x, source_y)
+    |> Nx.round()
+    |> Nx.clip(0, 255)
+    |> Nx.as_type(:u8)
   end
 
   @doc """
@@ -60,7 +93,11 @@ defmodule NxStereo.Rectify do
   computes.
   """
   defn maps(image, camera) do
-    {u, v} = pixel_grid(image)
+    project(pixel_grid(Nx.shape(image)), camera)
+  end
+
+  defnp project(grid, camera) do
+    {u, v} = grid
     ir = camera.inverse_pr
 
     x = ir[0][0] * u + ir[0][1] * v + ir[0][2]
@@ -79,12 +116,11 @@ defmodule NxStereo.Rectify do
     {k[0][0] * xd + k[0][1] * yd + k[0][2], k[1][1] * yd + k[1][2]}
   end
 
-  deftransformp pixel_grid(image) do
-    shape = Nx.shape(image)
+  deftransformp pixel_grid(shape) do
     {Nx.iota(shape, axis: 1, type: :f32), Nx.iota(shape, axis: 0, type: :f32)}
   end
 
-  defnp remap(image, map_x, map_y) do
+  defnp bilinear(image, map_x, map_y) do
     {height, width} = Nx.shape(image)
     flat = image |> Nx.reshape({:auto}) |> Nx.as_type(:f32)
 
@@ -103,10 +139,7 @@ defmodule NxStereo.Rectify do
       (1 - fx) * sample(flat, x0, y0 + 1, height, width) +
         fx * sample(flat, x0 + 1, y0 + 1, height, width)
 
-    ((1 - fy) * top + fy * bottom)
-    |> Nx.round()
-    |> Nx.clip(0, 255)
-    |> Nx.as_type(:u8)
+    (1 - fy) * top + fy * bottom
   end
 
   # Outside the image a neighbour reads 0, as OpenCV's BORDER_CONSTANT.
