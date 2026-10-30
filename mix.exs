@@ -23,8 +23,7 @@ defmodule NxStereo.MixProject do
   defp deps do
     [
       {:nx, "~> 1.0"},
-      {:nx_iree,
-       github: "Spin42/nx_iree", ref: "b9257ba76d4848cd00ef996cd9bd20c647e6d018", optional: true},
+      {:nx_iree, github: "Spin42/nx_iree", optional: true},
       {:exla, "~> 1.0", only: [:dev, :test]}
     ]
   end
