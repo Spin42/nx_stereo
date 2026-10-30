@@ -38,7 +38,9 @@ defmodule NxStereo do
     * `:disparities` - the number of disparities searched, 64 or 128.
       Defaults to 64.
     * `:p1` - the penalty for a disparity change of one between neighbours.
-      Defaults to 8.
+      Defaults to 8. `:p1`, `:p2` and `:uniqueness` may be scalar tensors:
+      they are then inputs of a compiled function, changed without
+      compiling again, and checked by the caller.
     * `:p2` - the penalty for larger changes. Must exceed `:p1` and be at
       most 79. Defaults to 64.
     * `:uniqueness` - a match is kept when the second-best cost, ignoring
@@ -62,20 +64,24 @@ defmodule NxStereo do
       )
 
     config = config!(left, right, opts)
+    penalties = Nx.stack(Enum.map([opts[:p1], opts[:p2], opts[:uniqueness]], &to_f32/1))
     left = Nx.as_type(left, :s32)
     right = Nx.as_type(right, :s32)
     output = Nx.template({config.height, config.width}, :f32)
 
     case NxStereo.Vulkan.pipeline(config) do
       nil ->
-        sgm_n(left, right, Map.to_list(config))
+        sgm_n(left, right, penalties, Map.to_list(config))
 
       pipeline ->
-        Nx.block(pipeline, [left, right], output, fn _, l, r ->
-          sgm_n(l, r, Map.to_list(config))
+        Nx.block(pipeline, [left, right, penalties], output, fn _, l, r, p ->
+          sgm_n(l, r, p, Map.to_list(config))
         end)
     end
   end
+
+  defp to_f32(%Nx.Tensor{} = value), do: Nx.as_type(value, :f32)
+  defp to_f32(value), do: Nx.f32(value)
 
   defp config!(left, right, opts) do
     left = Nx.to_template(left)
@@ -104,13 +110,16 @@ defmodule NxStereo do
     unless disparities in [64, 128],
       do: raise(ArgumentError, ":disparities must be 64 or 128, got #{inspect(disparities)}")
 
-    # The shaders sum pairs of paths bytewise, so each stays below 128
-    unless is_integer(p1) and is_integer(p2) and p1 >= 0 and p1 < p2 and p2 + @census_bound <= 127 do
+    # The shaders sum pairs of paths bytewise, so each stays below 128.
+    # Penalties given as tensors are inputs, checked by the caller.
+    unless tensor?(p1) or tensor?(p2) or
+             (is_integer(p1) and is_integer(p2) and p1 >= 0 and p1 < p2 and
+                p2 + @census_bound <= 127) do
       raise ArgumentError,
             "expected integers 0 <= :p1 < :p2 <= #{127 - @census_bound}, got #{inspect({p1, p2})}"
     end
 
-    unless is_number(uniqueness) and uniqueness >= 1.0 do
+    unless tensor?(uniqueness) or (is_number(uniqueness) and uniqueness >= 1.0) do
       raise ArgumentError,
             ":uniqueness must be a number of at least 1.0, got #{inspect(uniqueness)}"
     end
@@ -118,24 +127,18 @@ defmodule NxStereo do
     unless opts[:paths] in [3, 8],
       do: raise(ArgumentError, ":paths must be 3 or 8, got #{inspect(opts[:paths])}")
 
-    %{
-      height: height,
-      width: width,
-      disparities: disparities,
-      p1: p1,
-      p2: p2,
-      uniqueness: uniqueness * 1.0,
-      paths: opts[:paths]
-    }
+    %{height: height, width: width, disparities: disparities, paths: opts[:paths]}
   end
+
+  defp tensor?(value), do: is_struct(value, Nx.Tensor)
 
   # The reference implementation, and the block's default where the shaders
   # do not apply
-  defnp sgm_n(left, right, opts) do
+  defnp sgm_n(left, right, penalties, opts) do
     disparities = opts[:disparities]
     costs = matching_costs(census(left), census(right), disparities)
-    {disparity, keys} = select(aggregate(costs, opts), opts)
-    disparity |> consistency(keys, disparities) |> median()
+    {disparity, keys} = select(aggregate(costs, penalties, opts), penalties, opts)
+    disparity |> consistency(keys, disparities) |> NxStereo.Image.median(3)
   end
 
   # 48 bits per pixel, one per neighbour of the 9x7 window outside the centre
@@ -182,23 +185,23 @@ defmodule NxStereo do
   end
 
   # The sum of the path costs along every aggregation direction
-  deftransformp aggregate(costs, opts) do
-    down = fn shift -> scan(costs, Keyword.put(opts, :shift, shift)) end
+  deftransformp aggregate(costs, penalties, opts) do
+    down = fn shift -> scan(costs, penalties, Keyword.put(opts, :shift, shift)) end
 
     up = fn shift ->
       costs
       |> Nx.reverse(axes: [0])
-      |> scan(Keyword.put(opts, :shift, shift))
+      |> scan(penalties, Keyword.put(opts, :shift, shift))
       |> Nx.reverse(axes: [0])
     end
 
     rows = Nx.transpose(costs, axes: [1, 0, 2])
 
     horizontal = [
-      rows |> scan(opts) |> Nx.transpose(axes: [1, 0, 2]),
+      rows |> scan(penalties, opts) |> Nx.transpose(axes: [1, 0, 2]),
       rows
       |> Nx.reverse(axes: [0])
-      |> scan(opts)
+      |> scan(penalties, opts)
       |> Nx.reverse(axes: [0])
       |> Nx.transpose(axes: [1, 0, 2])
     ]
@@ -215,22 +218,22 @@ defmodule NxStereo do
   # libSGM's normalized path recurrence along the first axis. With `:shift`
   # of 1 or -1 the path also moves one step along the second axis per step,
   # following a diagonal; it starts from zero where it enters the image.
-  defnp scan(costs, opts) do
-    p1 = opts[:p1]
-    p2 = opts[:p2]
+  defnp scan(costs, penalties, opts) do
+    p1 = Nx.as_type(penalties[0], :s32)
+    p2 = Nx.as_type(penalties[1], :s32)
     {steps, lines, disparities} = Nx.shape(costs)
     previous = Nx.broadcast(0, {lines, disparities})
     paths = Nx.broadcast(0, costs)
 
-    {_previous, paths, _costs} =
-      while {previous, paths, costs}, i <- 0..(steps - 1) do
+    {_previous, paths, _costs, _p1, _p2} =
+      while {previous, paths, costs, p1, p2}, i <- 0..(steps - 1) do
         previous = follow(previous, opts[:shift])
         a = previous - Nx.reduce_min(previous, axes: [1], keep_axes: true)
         lower = Nx.pad(a, p2 - p1, [{0, 0, 0}, {1, -1, 0}])
         upper = Nx.pad(a, p2 - p1, [{0, 0, 0}, {-1, 1, 0}])
         cost = Nx.slice_along_axis(costs, i, 1, axis: 0) |> Nx.squeeze(axes: [0])
         value = Nx.min(Nx.min(a, p2), Nx.min(lower, upper) + p1) + cost
-        {value, Nx.put_slice(paths, [i, 0, 0], Nx.new_axis(value, 0)), costs}
+        {value, Nx.put_slice(paths, [i, 0, 0], Nx.new_axis(value, 0)), costs, p1, p2}
       end
 
     paths
@@ -247,7 +250,7 @@ defmodule NxStereo do
 
   # Winner, uniqueness check and subpixel refinement, as the shaders compute
   # them in f32. Disparities past the image's left edge never win.
-  defnp select(sums, opts) do
+  defnp select(sums, penalties, opts) do
     disparities = opts[:disparities]
     {_height, width, _} = Nx.shape(sums)
     d = Nx.iota({1, 1, disparities})
@@ -268,7 +271,7 @@ defmodule NxStereo do
 
     minimum_f = Nx.as_type(minimum, :f32)
 
-    accepted = Nx.as_type(second, :f32) > minimum_f * Nx.f32(opts[:uniqueness])
+    accepted = Nx.as_type(second, :f32) > minimum_f * penalties[2]
     denominator = lower + upper - 2 * minimum_f
     correction = Nx.clip((lower - upper) / (2 * Nx.max(denominator, 1)), -0.5, 0.5)
     x = Nx.iota({1, width, 1}, axis: 1)
@@ -321,14 +324,5 @@ defmodule NxStereo do
     match = Nx.take_along_axis(right, Nx.clip(rx, 0, width - 1), axis: 1)
     right_d = 65_535 - Nx.as_type(Nx.bitwise_and(match, 0xFFFF), :s32)
     inside and match != Nx.u32(@invalid_key) and Nx.abs(right_d - d) > 1
-  end
-
-  # 3x3 median with replicated borders
-  deftransformp median(disparity) do
-    for(dy <- -1..1, dx <- -1..1, do: shift(disparity, dy, dx))
-    |> Nx.stack(axis: 2)
-    |> Nx.sort(axis: 2)
-    |> Nx.slice_along_axis(4, 1, axis: 2)
-    |> Nx.squeeze(axes: [2])
   end
 end

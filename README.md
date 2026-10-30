@@ -19,6 +19,17 @@ faster frames, see [Speed or accuracy](#speed-or-accuracy).
 nearby objects shift by more than 128 pixels between the two images, run on
 downscaled images.
 
+## Around the matcher
+
+The steps before and after matching are Nx functions too, so a whole depth
+pipeline compiles into one function:
+
+  * `NxStereo.Rectify`: undistortion and rectification, as OpenCV's
+    `initUndistortRectifyMap` and `remap`, with the calibration as inputs.
+  * `NxStereo.Image`: area resizing, a 3x3 or 5x5 median and the turbo
+    colour map.
+  * `NxStereo.Depth`: metric depth and a point cloud from a disparity map.
+
 ## What runs where
 
 `NxStereo.sgm/3` is plain Nx. How it runs depends on the compiler that calls
@@ -140,8 +151,10 @@ OpenCV's StereoSGBM consistency rules (BSD-3-Clause, see `OPENCV-LICENSE`).
 The stages are the Census transform, the forward and reverse horizontal
 cost scans, with 8 paths the bottom-to-top and diagonal scans, the
 top-to-bottom scan (which also selects the winners), the consistency check
-and the median. Image size and penalties are specialization constants, so the
-SPIR-V in `priv/spirv` is compiled once per stage and disparity range;
+and the median. Image size is a specialization constant and the penalties a
+`{3}` f32 input of the cost stages, so the SPIR-V in `priv/spirv` is compiled
+once per stage and disparity range and the penalties change without a new
+pipeline;
 `mix nx_stereo.shaders` regenerates it with `glslangValidator`.
 
 ## Tests

@@ -83,6 +83,27 @@ defmodule NxStereoTest do
     assert Nx.to_flat_list(jitted) == Nx.to_flat_list(evaluated)
   end
 
+  test "takes the penalties as tensors, changed without compiling again" do
+    {left, right} = layered(24, 96, 4.5, 14.25)
+
+    compiled =
+      Nx.Defn.compile(
+        &NxStereo.sgm(&1, &2, p1: &3, p2: &4, uniqueness: &5),
+        [left, right, Nx.template({}, :f32), Nx.template({}, :f32), Nx.template({}, :f32)],
+        compiler: EXLA
+      )
+
+    results =
+      for {p1, p2, uniqueness} <- [{10, 60, 1.05}, {3, 20, 1.3}] do
+        expected = NxStereo.sgm(left, right, p1: p1, p2: p2, uniqueness: uniqueness)
+        actual = compiled.(left, right, Nx.f32(p1), Nx.f32(p2), Nx.f32(uniqueness))
+        assert Nx.to_flat_list(actual) == Nx.to_flat_list(expected)
+        Nx.to_flat_list(actual)
+      end
+
+    assert Enum.uniq(results) |> length() == 2
+  end
+
   test "validates its inputs" do
     {left, right} = pair(16, 80, 0)
 
@@ -169,6 +190,31 @@ defmodule NxStereoTest do
 
           assert mismatches == [],
                  "pixels differ on #{device.uri}: #{inspect(Enum.take(mismatches, 20))}"
+        end
+      end
+    end
+
+    test "the shaders take the penalties as inputs", %{devices: devices} do
+      {left, right} = layered(24, 160, 4.5, 14.25)
+      templates = [Nx.template({}, :f32), Nx.template({}, :f32), Nx.template({}, :f32)]
+      sgm = &NxStereo.sgm(&1, &2, p1: &3, p2: &4, uniqueness: &5)
+
+      for device <- devices do
+        compiled =
+          Nx.Defn.compile(sgm, [left, right | templates],
+            compiler: NxIREE.Compiler,
+            iree_runtime_options: [device: device]
+          )
+
+        for {p1, p2, uniqueness} <- [{7, 70, 1.05}, {3, 20, 1.3}] do
+          reference = NxStereo.sgm(left, right, p1: p1, p2: p2, uniqueness: uniqueness)
+
+          gpu =
+            compiled.(left, right, Nx.f32(p1), Nx.f32(p2), Nx.f32(uniqueness))
+            |> Nx.backend_transfer(Nx.BinaryBackend)
+
+          decisions = fn t -> t |> Nx.floor() |> Nx.to_flat_list() end
+          assert decisions.(gpu) == decisions.(reference), "#{device.uri}, #{p1}/#{p2}"
         end
       end
     end

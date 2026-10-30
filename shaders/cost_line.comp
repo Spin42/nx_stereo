@@ -11,17 +11,16 @@
 // l - (HEIGHT - 1) + i (STEP_X = 1) or l - i (STEP_X = -1) at step i. A
 // diagonal line keeps a zero path until it enters the image.
 layout(local_size_x = 128) in;
-// Image size and penalties are specialization constants; the disparity
+// Image size is a specialization constant; the disparity
 // range and lane layout stay compile-time macros.
 layout(constant_id = 0) const int WIDTH = 640;
 layout(constant_id = 1) const int HEIGHT = 480;
-layout(constant_id = 2) const int P1 = 8;
-layout(constant_id = 3) const int P2 = 64;
-layout(constant_id = 4) const float UNIQUENESS = 1.0526315789473684;
+#include "params.glsl"
 #include "cost_dp.glsl"
-layout(set = 0, binding = 0) readonly buffer Costs { PATH_WORD_TYPE cost_words[]; };
-layout(set = 0, binding = 1) writeonly buffer Paths { PATH_WORD_TYPE paths[]; };
+layout(set = 0, binding = 1) readonly buffer Costs { PATH_WORD_TYPE cost_words[]; };
+layout(set = 0, binding = 2) writeonly buffer Paths { PATH_WORD_TYPE paths[]; };
 void main() {
+  load_params();
   uint lane = gl_SubgroupInvocationID % LANES;
   uint base = gl_SubgroupInvocationID - lane;
   LaneGeometry g = lane_geometry(lane, base);

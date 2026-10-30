@@ -35,13 +35,7 @@ defmodule NxStereo.Vulkan do
       %NxIREE.Vulkan.Kernel{
         spirv: Map.fetch!(@spirv, {stage, disparities}),
         workgroups: workgroups,
-        specialization: %{
-          0 => width,
-          1 => height,
-          2 => config.p1,
-          3 => config.p2,
-          4 => config.uniqueness
-        }
+        specialization: %{0 => width, 1 => height}
       }
     end
 
@@ -54,7 +48,7 @@ defmodule NxStereo.Vulkan do
       if config.paths == 8 do
         for {stage, name} <- @lines do
           count = if stage == :cost_up, do: width, else: width + height - 1
-          {kernel.(stage, {ceil_div(count, tile), 1, 1}), [:costs], [{name, volume}]}
+          {kernel.(stage, {ceil_div(count, tile), 1, 1}), [:params, :costs], [{name, volume}]}
         end
       else
         []
@@ -66,17 +60,18 @@ defmodule NxStereo.Vulkan do
         else: {:cost_vertical, [:forward, :reverse]}
 
     %NxIREE.Vulkan.Pipeline{
-      inputs: [:left, :right],
+      inputs: [:left, :right, :params],
       stages:
         [
           {kernel.(:census, {ceil_div(width, div(128, tile)), ceil_div(height, 4 * tile), 1}),
            [:left, :right], [features: Nx.template({tiled_pixels * 4}, :u32)]},
-          {kernel.(:cost_forward, {rows, 1, 1}), [:features], [forward: volume, costs: volume]},
-          {kernel.(:cost_reverse, {rows, 1, 1}), [:costs], [reverse: volume]}
+          {kernel.(:cost_forward, {rows, 1, 1}), [:params, :features],
+           [forward: volume, costs: volume]},
+          {kernel.(:cost_reverse, {rows, 1, 1}), [:params, :costs], [reverse: volume]}
         ] ++
           lines ++
           [
-            {kernel.(vertical, {ceil_div(width, tile), 1, 1}), [:costs | stored],
+            {kernel.(vertical, {ceil_div(width, tile), 1, 1}), [:params, :costs | stored],
              [disparity: map, winners: Nx.template({pixels}, :u32)]},
             {kernel.(:consistency, {height, 1, 1}), [:disparity, :winners], [consistent: map]},
             {kernel.(:median, {ceil_div(pixels, 128), 1, 1}), [:consistent],
