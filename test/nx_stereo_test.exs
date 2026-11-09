@@ -104,10 +104,18 @@ defmodule NxStereoTest do
     assert Enum.uniq(results) |> length() == 2
   end
 
+  test "matches 32-bit images as their 8-bit pixels" do
+    {left, right} = pair(16, 80, 3)
+    fun = &NxStereo.sgm(&1, &2, p1: 10, p2: 60)
+
+    wide = Nx.Defn.jit(fun).(Nx.as_type(left, :s32), Nx.as_type(right, :s32))
+    assert Nx.to_flat_list(wide) == Nx.to_flat_list(Nx.Defn.jit(fun).(left, right))
+  end
+
   test "validates its inputs" do
     {left, right} = pair(16, 80, 0)
 
-    assert_raise ArgumentError, ~r/expects u8 images/, fn ->
+    assert_raise ArgumentError, ~r/expects u8 or s32 images/, fn ->
       NxStereo.sgm(Nx.as_type(left, :f32), right)
     end
 

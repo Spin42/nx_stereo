@@ -6,7 +6,8 @@ Semi-global stereo matching for [Nx](https://github.com/elixir-nx/nx).
 disparity = NxStereo.sgm(left, right, disparities: 64, p1: 8, p2: 64)
 ```
 
-`left` and `right` are rectified `{height, width}` `u8` images; the result is
+`left` and `right` are rectified `{height, width}` `u8` images (or `s32` ones
+holding 8-bit pixels, for a GPU without 8-bit storage); the result is
 an `f32` disparity map with `-1.0` where no reliable match was found. The
 algorithm follows libSGM: a 9x7 Census transform that ignores one-level
 differences, so that sensor noise on dark or flat surfaces does not count as

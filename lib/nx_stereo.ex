@@ -26,9 +26,10 @@ defmodule NxStereo do
   @doc """
   Computes the disparity map of the `left` image against the `right` one.
 
-  Both images are `{height, width}` tensors of type `u8`, rectified so that
-  matches lie on the same row and a point at column `x` in `left` appears at
-  `x - d` in `right` for its disparity `d >= 0`. The result is an `f32`
+  Both images are `{height, width}` tensors of the same type, `u8`, or
+  `s32` holding 8-bit pixels for a device without 8-bit storage buffers,
+  rectified so that matches lie on the same row and a point at column `x`
+  in `left` appears at `x - d` in `right` for its disparity `d >= 0`. The result is an `f32`
   tensor of the same shape: the disparity of each left pixel, with a
   fractional part from subpixel refinement, or `-1.0` where no reliable match
   was found.
@@ -87,9 +88,9 @@ defmodule NxStereo do
     left = Nx.to_template(left)
     right = Nx.to_template(right)
 
-    unless left.type == {:u, 8} and right.type == {:u, 8} do
+    unless left.type in [{:u, 8}, {:s, 32}] and right.type == left.type do
       raise ArgumentError,
-            "NxStereo.sgm/3 expects u8 images, got #{inspect(left.type)} and #{inspect(right.type)}"
+            "NxStereo.sgm/3 expects u8 or s32 images, got #{inspect(left.type)} and #{inspect(right.type)}"
     end
 
     {height, width} =
