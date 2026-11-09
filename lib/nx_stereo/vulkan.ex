@@ -35,6 +35,13 @@ defmodule NxStereo.Vulkan do
                  {{stage, band}, File.read!(path)}
                end)
 
+  # sgm_coarse_to_fine/3's steps between its two matchings
+  @coarse_spirv (for stage <- ~w(shrink band_base)a, into: %{} do
+                   path = Path.join(@spirv_dir, "#{stage}.spv")
+                   @external_resource path
+                   {stage, File.read!(path)}
+                 end)
+
   # sgm_band/4's scans, by direction, and how many lines each runs
   @band_scans [
     band_scan_forward: :rows,
@@ -46,6 +53,45 @@ defmodule NxStereo.Vulkan do
     band_scan_up_right: :diagonals,
     band_scan_up_left: :diagonals
   ]
+
+  @doc false
+  # Both s32 images of {height, width} shrunk 2x, each pixel the rounded mean of a 2x2 block
+  def shrink_pipeline(height, width) do
+    if Code.ensure_loaded?(NxIREE.Vulkan.Pipeline) do
+      {half_height, half_width} = {div(height, 2), div(width, 2)}
+      half = Nx.template({half_height, half_width}, :s32)
+
+      kernel = %NxIREE.Vulkan.Kernel{
+        spirv: @coarse_spirv.shrink,
+        workgroups: {ceil_div(half_height * half_width, 64), 1, 1},
+        specialization: %{0 => half_width, 1 => half_height}
+      }
+
+      %NxIREE.Vulkan.Pipeline{
+        inputs: [:left, :right],
+        stages: [{kernel, [:left, :right], [left_half: half, right_half: half]}],
+        outputs: [:left_half, :right_half]
+      }
+    end
+  end
+
+  @doc false
+  # The s32 band bases of a {height, width} pair from its half-size f32 disparity
+  def band_base_pipeline(height, width, margin, max_base) do
+    if Code.ensure_loaded?(NxIREE.Vulkan.Pipeline) do
+      kernel = %NxIREE.Vulkan.Kernel{
+        spirv: @coarse_spirv.band_base,
+        workgroups: {ceil_div(height * width, 64), 1, 1},
+        specialization: %{0 => width, 1 => height, 2 => margin, 3 => max_base}
+      }
+
+      %NxIREE.Vulkan.Pipeline{
+        inputs: [:coarse],
+        stages: [{kernel, [:coarse], [base: Nx.template({height, width}, :s32)]}],
+        outputs: [:base]
+      }
+    end
+  end
 
   def pipeline(config) do
     if Code.ensure_loaded?(NxIREE.Vulkan.Pipeline), do: build(config)

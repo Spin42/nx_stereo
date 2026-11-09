@@ -1,0 +1,30 @@
+#version 450
+// NxStereo.sgm_coarse_to_fine/3's band bases: each full-size pixel's band
+// starts MARGIN below twice the lowest coarse match in the 3x3 coarse
+// neighbourhood of its 2x2 block, clipped to [0, MAX_BASE]; -1 where that
+// neighbourhood holds no match (a negative coarse disparity).
+layout(local_size_x = 64) in;
+// The full-size image's width and height.
+layout(constant_id = 0) const int WIDTH = 640;
+layout(constant_id = 1) const int HEIGHT = 480;
+layout(constant_id = 2) const int MARGIN = 4;
+layout(constant_id = 3) const int MAX_BASE = 112;
+layout(set = 0, binding = 0) readonly buffer Coarse { float coarse[]; };
+layout(set = 0, binding = 1) writeonly buffer Base { int base[]; };
+
+void main() {
+  int i = int(gl_GlobalInvocationID.x);
+  if (i >= WIDTH * HEIGHT) return;
+  int coarse_width = WIDTH / 2, coarse_height = HEIGHT / 2;
+  int cx = (i % WIDTH) / 2, cy = (i / WIDTH) / 2;
+  float lowest = 1.0e9;
+  for (int dy = -1; dy <= 1; ++dy) {
+    for (int dx = -1; dx <= 1; ++dx) {
+      int x = cx + dx, y = cy + dy;
+      if (x < 0 || x >= coarse_width || y < 0 || y >= coarse_height) continue;
+      float value = coarse[y * coarse_width + x];
+      if (value >= 0.0) lowest = min(lowest, value);
+    }
+  }
+  base[i] = lowest < 1.0e9 ? clamp(int(floor(lowest * 2.0)) - MARGIN, 0, MAX_BASE) : -1;
+}

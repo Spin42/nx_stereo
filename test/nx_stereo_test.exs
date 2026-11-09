@@ -363,30 +363,35 @@ defmodule NxStereoTest do
       end
     end
 
-    test "coarse to fine on the shaders matches the reference", %{devices: devices} do
-      {left, right} = layered(48, 240, 20.5, 60.25)
-      fun = &NxStereo.sgm_coarse_to_fine(&1, &2, p1: 7, p2: 70, uniqueness: 1.05)
-      reference = Nx.Defn.jit(fun, compiler: EXLA).(left, right) |> Nx.to_flat_list()
+    for type <- [:u8, :s32] do
+      test "coarse to fine on the shaders matches the reference, #{type} images", %{
+        devices: devices
+      } do
+        {left, right} = layered(48, 240, 20.5, 60.25)
+        {left, right} = {Nx.as_type(left, unquote(type)), Nx.as_type(right, unquote(type))}
+        fun = &NxStereo.sgm_coarse_to_fine(&1, &2, p1: 7, p2: 70, uniqueness: 1.05)
+        reference = Nx.Defn.jit(fun, compiler: EXLA).(left, right) |> Nx.to_flat_list()
 
-      for device <- devices do
-        gpu =
-          Nx.Defn.jit(fun, compiler: NxIREE.Compiler, iree_runtime_options: [device: device]).(
-            left,
-            right
-          )
-          |> Nx.backend_transfer(Nx.BinaryBackend)
-          |> Nx.to_flat_list()
+        for device <- devices do
+          gpu =
+            Nx.Defn.jit(fun, compiler: NxIREE.Compiler, iree_runtime_options: [device: device]).(
+              left,
+              right
+            )
+            |> Nx.backend_transfer(Nx.BinaryBackend)
+            |> Nx.to_flat_list()
 
-        mismatches =
-          Enum.zip(gpu, reference)
-          |> Enum.with_index()
-          |> Enum.reject(fn {{a, b}, _} ->
-            a == -1.0 == (b == -1.0) and trunc(a) == trunc(b) and
-              abs(a - b) <= 2.4e-7 * max(abs(b), 1.0)
-          end)
+          mismatches =
+            Enum.zip(gpu, reference)
+            |> Enum.with_index()
+            |> Enum.reject(fn {{a, b}, _} ->
+              a == -1.0 == (b == -1.0) and trunc(a) == trunc(b) and
+                abs(a - b) <= 2.4e-7 * max(abs(b), 1.0)
+            end)
 
-        assert mismatches == [],
-               "pixels differ on #{device.uri}: #{inspect(Enum.take(mismatches, 20))}"
+          assert mismatches == [],
+                 "pixels differ on #{device.uri}: #{inspect(Enum.take(mismatches, 20))}"
+        end
       end
     end
 

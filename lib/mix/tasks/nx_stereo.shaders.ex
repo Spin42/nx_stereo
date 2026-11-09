@@ -66,6 +66,13 @@ defmodule Mix.Tasks.NxStereo.Shaders do
       compile!(compiler, args, source, output)
     end
 
+    # sgm_coarse_to_fine/3's steps between its matchings take no build parameter.
+    for source <- ["shrink", "band_base"] do
+      output = "priv/spirv/#{source}.spv"
+      args = ~w(-V --target-env vulkan1.1 -S comp -o) ++ [output, "shaders/#{source}.comp"]
+      compile!(compiler, args, source, output)
+    end
+
     # The band shaders read the census features in the 128-disparity tiles.
     for band <- [8, 16, 32, 64], {stage, {source, flags}} <- @band_stages do
       output = "priv/spirv/#{stage}_b#{band}.spv"

@@ -189,14 +189,16 @@ defmodule NxStereo do
 
     penalties = Keyword.take(opts, [:p1, :p2, :uniqueness])
 
+    {left_half, right_half} = shrink_pair(left, right)
+
     coarse =
       sgm(
-        shrink(left),
-        shrink(right),
+        left_half,
+        right_half,
         [disparities: 64, paths: opts[:coarse_paths] || opts[:paths]] ++ penalties
       )
 
-    base = band_base(coarse, opts[:band], opts[:margin])
+    base = coarse_base(coarse, opts[:band], opts[:margin])
 
     sgm_band(
       left,
@@ -204,6 +206,39 @@ defmodule NxStereo do
       base,
       [disparities: 128, paths: opts[:paths], band: opts[:band]] ++ penalties
     )
+  end
+
+  # Both images shrunk 2x, as shaders on Vulkan for s32 images
+  deftransformp shrink_pair(left, right) do
+    {height, width} = Nx.shape(left)
+
+    case Nx.type(left) == {:s, 32} && NxStereo.Vulkan.shrink_pipeline(height, width) do
+      pipeline when is_struct(pipeline) ->
+        half = Nx.template({div(height, 2), div(width, 2)}, :s32)
+
+        Nx.block(pipeline, [left, right], {half, half}, fn _, left, right ->
+          {shrink(left), shrink(right)}
+        end)
+
+      _ ->
+        {shrink(left), shrink(right)}
+    end
+  end
+
+  # The bases of band_base/3, as a shader on Vulkan
+  deftransformp coarse_base(coarse, band, margin) do
+    {height, width} = Nx.shape(coarse)
+    {height, width} = {2 * height, 2 * width}
+
+    case NxStereo.Vulkan.band_base_pipeline(height, width, margin, 128 - band) do
+      nil ->
+        band_base(coarse, band, margin)
+
+      pipeline ->
+        Nx.block(pipeline, [coarse], Nx.template({height, width}, :s32), fn _, coarse ->
+          band_base(coarse, band, margin)
+        end)
+    end
   end
 
   # The 2x2 average, rounded, in the image's type
