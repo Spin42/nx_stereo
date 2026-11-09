@@ -159,7 +159,7 @@ defmodule NxStereo.Vulkan do
            ), [:left, :right], [features: Nx.template({tiled_pixels * 4}, :u32)]},
           {kernel.(
              Map.fetch!(@band_spirv, {:band_cost, band}),
-             {ceil_div(width, 64), height, 1},
+             {ceil_div(width, 64), ceil_div(height, 4), 1},
              %{2 => disparities}
            ), [:features, :base], [costs: path]}
         ] ++

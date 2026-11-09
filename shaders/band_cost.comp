@@ -5,9 +5,9 @@
 // NxStereo.sgm_band/4's matching costs, computed once for every path: the
 // Hamming distance between a pixel's left census and the right census of each
 // candidate in its band, a byte per candidate, packed as the paths are. A
-// workgroup covers 64 pixels of a row: it loads the right census of every
-// column they can reach once, into shared memory, and writes its costs as
-// consecutive words.
+// workgroup covers ROWS rows of 64 pixels: it loads the right census of
+// every column they can reach once, into shared memory, reading whole runs of
+// the feature tiles, and each thread writes its pixels' costs.
 layout(local_size_x = 64) in;
 layout(constant_id = 0) const int WIDTH = 640;
 layout(constant_id = 1) const int HEIGHT = 480;
@@ -17,39 +17,44 @@ layout(constant_id = 2) const int DISPARITIES = 128;
 layout(set = 0, binding = 0) readonly buffer Features { uvec2 features[]; };
 layout(set = 0, binding = 1) readonly buffer Base { int base[]; };
 layout(set = 0, binding = 2) writeonly buffer Costs { uint costs[]; };
-
-// Columns first .. first + 63 + DISPARITIES - 1, first = the workgroup's - (DISPARITIES - 1).
-shared uvec2 right_census[64 + DISPARITIES - 1];
-shared uint words[64 * WORDS];
+#define ROWS 4
+#define REACH (64 + DISPARITIES - 1)
+// Per row, columns first .. first + REACH - 1, first = the workgroup's - (DISPARITIES - 1).
+shared uvec2 right_census[ROWS * REACH];
 
 void main() {
   int t = int(gl_LocalInvocationID.x);
-  int y = int(gl_WorkGroupID.y);
+  int top = int(gl_WorkGroupID.y) * ROWS;
   int start = int(gl_WorkGroupID.x) * 64;
   int x = start + t;
   int first = start - (DISPARITIES - 1);
 
-  for (int m = t; m < 64 + DISPARITIES - 1; m += 64) {
-    int column = first + m;
+  // Consecutive threads read a column's consecutive rows, adjacent in the feature tiles.
+  for (int m = t; m < ROWS * REACH; m += 64) {
+    int r = m % ROWS, column = first + m / ROWS, y = top + r;
     // Right features left of the image are zero, as libSGM pads them.
-    right_census[m] = column >= 0 && column < WIDTH ? features[2 * feature_index(column, y) + 1] : uvec2(0u);
+    right_census[r * REACH + m / ROWS] =
+        column >= 0 && column < WIDTH && y < HEIGHT ? features[2 * feature_index(column, y) + 1] : uvec2(0u);
   }
   barrier();
 
-  if (x < WIDTH) {
+  if (x >= WIDTH) return;
+  for (int r = 0; r < ROWS; ++r) {
+    int y = top + r;
+    if (y >= HEIGHT) break;
     int b = max(base[y * WIDTH + x], 0);
     uvec2 centre = features[2 * feature_index(x, y)];
+    // The band's right census, lowest column first: candidate k is BAND - 1 - k.
+    uvec2 band_census[BAND];
+    int lowest = r * REACH + x - b - (BAND - 1) - first;
+    for (int j = 0; j < BAND; ++j) band_census[j] = right_census[lowest + j];
     for (int w = 0; w < WORDS; ++w) {
       uint word = 0u;
       for (int c = 0; c < 4; ++c) {
-        uvec2 right = right_census[x - (b + 4 * w + c) - first];
+        uvec2 right = band_census[BAND - 1 - (4 * w + c)];
         word |= (bitCount(centre.x ^ right.x) + bitCount(centre.y ^ right.y)) << (8 * c);
       }
-      words[t * WORDS + w] = word;
+      costs[(y * WIDTH + x) * WORDS + w] = word;
     }
   }
-  barrier();
-
-  for (int m = t; m < 64 * WORDS; m += 64)
-    if (start + m / WORDS < WIDTH) costs[(y * WIDTH + start) * WORDS + m] = words[m];
 }
