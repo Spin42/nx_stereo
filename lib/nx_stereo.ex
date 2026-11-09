@@ -10,6 +10,9 @@ defmodule NxStereo do
   uniqueness check and parabolic subpixel refinement, OpenCV's left-right
   consistency check, and a 3x3 median filter.
 
+  `sgm_band/4` does the same within a band of disparities per pixel, for a
+  search refined around an earlier estimate.
+
   It is written in `Nx.Defn` and runs on every Nx backend and compiler.
   Compiled by `NxIREE.Compiler` for Vulkan, it runs as compute shaders
   ported from Fixstars' libSGM instead, with the same matches; subpixel
@@ -132,6 +135,210 @@ defmodule NxStereo do
   end
 
   defp tensor?(value), do: is_struct(value, Nx.Tensor)
+
+  @doc """
+  Computes the disparity map of `left` against `right` as `sgm/3` does,
+  but searching each pixel's disparity only within a band: the `:band`
+  disparities from the pixel's `base`, an `s32` `{height, width}` tensor,
+  up to `base + band - 1`.
+
+  A path passing from one pixel to the next matches their candidates by
+  disparity; a candidate outside the previous pixel's band is reached
+  only with the `p2` penalty, as a jump. With a band covering every
+  disparity and a base of zero, the result is `sgm/3`'s. A narrow band
+  around a disparity estimated beforehand, such as a coarser matching's,
+  costs the band's width instead of the full range.
+
+  Takes `sgm/3`'s options and `:band`, a multiple of 8 up to
+  `:disparities`; the caller keeps `base + band` within `:disparities`.
+  Defaults to 16.
+  """
+  deftransform sgm_band(left, right, base, opts \\ []) do
+    opts =
+      Keyword.validate!(opts,
+        disparities: 64,
+        p1: 8,
+        p2: 64,
+        uniqueness: 1.0526315789473684,
+        paths: 8,
+        band: 16
+      )
+
+    config = config!(left, right, Keyword.delete(opts, :band))
+    band = opts[:band]
+
+    unless is_integer(band) and band >= 8 and rem(band, 8) == 0 and band <= config.disparities do
+      raise ArgumentError,
+            ":band must be a multiple of 8 up to :disparities (#{config.disparities}), got #{inspect(band)}"
+    end
+
+    base_template = Nx.to_template(base)
+
+    unless base_template.type == {:s, 32} and base_template.shape == {config.height, config.width} do
+      raise ArgumentError,
+            "NxStereo.sgm_band/4 expects base as an s32 tensor of shape #{inspect({config.height, config.width})}, " <>
+              "got #{inspect(base_template.type)} #{inspect(base_template.shape)}"
+    end
+
+    penalties = Nx.stack(Enum.map([opts[:p1], opts[:p2], opts[:uniqueness]], &to_f32/1))
+
+    band_n(
+      Nx.as_type(left, :s32),
+      Nx.as_type(right, :s32),
+      base,
+      penalties,
+      Map.to_list(Map.put(config, :band, band))
+    )
+  end
+
+  defnp band_n(left, right, base, penalties, opts) do
+    disparities = opts[:disparities]
+    costs = band_costs(census(left), census(right), base, opts[:band])
+    sums = band_aggregate(costs, base, penalties, opts)
+    {disparity, keys} = band_select(sums, base, penalties, opts)
+    disparity |> consistency(keys, disparities) |> NxStereo.Image.median(3)
+  end
+
+  # costs[y, x, k] = popcount(left[y, x] ^ right[y, x - base[y, x] - k]), as matching_costs/3
+  deftransformp band_costs(left, right, base, band) do
+    {height, width} = left.shape
+    d = Nx.add(Nx.new_axis(base, 2), Nx.iota({1, 1, band}))
+    columns = Nx.subtract(Nx.iota({1, width, 1}, axis: 1), d)
+
+    sampled =
+      right
+      |> Nx.take_along_axis(
+        columns |> Nx.clip(0, width - 1) |> Nx.reshape({height, width * band}),
+        axis: 1
+      )
+      |> Nx.reshape({height, width, band})
+
+    shifted = Nx.select(Nx.less(columns, 0), Nx.u64(0), sampled)
+
+    left
+    |> Nx.new_axis(2)
+    |> Nx.bitwise_xor(shifted)
+    |> Nx.population_count()
+    |> Nx.as_type(:s32)
+  end
+
+  # aggregate/3 over band costs, each path carrying the base of the pixel it left
+  deftransformp band_aggregate(costs, base, penalties, opts) do
+    down = fn shift -> scan_band(costs, base, penalties, Keyword.put(opts, :shift, shift)) end
+
+    up = fn shift ->
+      costs
+      |> Nx.reverse(axes: [0])
+      |> scan_band(Nx.reverse(base, axes: [0]), penalties, Keyword.put(opts, :shift, shift))
+      |> Nx.reverse(axes: [0])
+    end
+
+    rows = Nx.transpose(costs, axes: [1, 0, 2])
+    row_bases = Nx.transpose(base)
+
+    horizontal = [
+      rows |> scan_band(row_bases, penalties, opts) |> Nx.transpose(axes: [1, 0, 2]),
+      rows
+      |> Nx.reverse(axes: [0])
+      |> scan_band(Nx.reverse(row_bases, axes: [0]), penalties, opts)
+      |> Nx.reverse(axes: [0])
+      |> Nx.transpose(axes: [1, 0, 2])
+    ]
+
+    paths =
+      case opts[:paths] do
+        3 -> horizontal ++ [down.(0)]
+        8 -> horizontal ++ [down.(0), up.(0), down.(1), down.(-1), up.(1), up.(-1)]
+      end
+
+    Enum.reduce(paths, &Nx.add/2)
+  end
+
+  # scan/3 over band costs: the previous pixel's normalized path costs are
+  # moved to this pixel's band by disparity, P2 standing for a candidate the
+  # previous band lacks, as it stands for a neighbour past the range in scan/3.
+  defnp scan_band(costs, base, penalties, opts) do
+    p1 = Nx.as_type(penalties[0], :s32)
+    p2 = Nx.as_type(penalties[1], :s32)
+    {steps, lines, band} = Nx.shape(costs)
+    previous = Nx.broadcast(0, {lines, band})
+    previous_base = Nx.broadcast(-1, {lines})
+    paths = Nx.broadcast(0, costs)
+    k = Nx.iota({1, band + 2}) - 1
+
+    {_previous, _previous_base, paths, _costs, _base, _p1, _p2} =
+      while {previous, previous_base, paths, costs, base, p1, p2}, i <- 0..(steps - 1) do
+        previous = follow(previous, opts[:shift])
+        current_base = Nx.slice_along_axis(base, i, 1, axis: 0) |> Nx.squeeze(axes: [0])
+        # A path entering the image starts from zero, in its own band
+        previous_base = follow_base(previous_base, opts[:shift])
+        previous_base = Nx.select(previous_base < 0, current_base, previous_base)
+
+        a = previous - Nx.reduce_min(previous, axes: [1], keep_axes: true)
+        index = k + Nx.new_axis(current_base - previous_base, 1)
+        inside = index >= 0 and index < band
+        moved = Nx.take_along_axis(a, Nx.clip(index, 0, band - 1), axis: 1)
+        window = Nx.select(inside, moved, p2)
+
+        own = Nx.slice_along_axis(window, 1, band, axis: 1)
+        lower = Nx.slice_along_axis(window, 0, band, axis: 1)
+        upper = Nx.slice_along_axis(window, 2, band, axis: 1)
+        cost = Nx.slice_along_axis(costs, i, 1, axis: 0) |> Nx.squeeze(axes: [0])
+        value = Nx.min(Nx.min(own, p2), Nx.min(lower, upper) + p1) + cost
+
+        {value, current_base, Nx.put_slice(paths, [i, 0, 0], Nx.new_axis(value, 0)), costs, base,
+         p1, p2}
+      end
+
+    paths
+  end
+
+  # follow/2 for the bases, -1 marking a line entering the image
+  deftransformp follow_base(previous_base, shift) do
+    case shift do
+      s when s in [nil, 0] -> previous_base
+      1 -> Nx.pad(previous_base, -1, [{1, -1, 0}])
+      -1 -> Nx.pad(previous_base, -1, [{-1, 1, 0}])
+    end
+  end
+
+  # select/3 within each pixel's band
+  defnp band_select(sums, base, penalties, opts) do
+    disparities = opts[:disparities]
+    {_height, width, band} = Nx.shape(sums)
+    k = Nx.iota({1, 1, band})
+    d = Nx.new_axis(base, 2) + k
+    x = Nx.iota({1, width, 1}, axis: 1)
+    values = sums + Nx.select(d > x, 0x8000, 0)
+
+    winner = Nx.argmin(values, axis: 2, keep_axis: true, tie_break: :low) |> Nx.as_type(:s32)
+    minimum = Nx.take_along_axis(values, winner, axis: 2)
+
+    second =
+      Nx.select(Nx.abs(k - winner) <= 1, Nx.Constants.max_finite(:s32), values)
+      |> Nx.reduce_min(axes: [2], keep_axes: true)
+
+    lower = Nx.take_along_axis(values, Nx.max(winner - 1, 0), axis: 2) |> Nx.as_type(:f32)
+    upper = Nx.take_along_axis(values, Nx.min(winner + 1, band - 1), axis: 2) |> Nx.as_type(:f32)
+    minimum_f = Nx.as_type(minimum, :f32)
+    winner_d = Nx.new_axis(base, 2) + winner
+
+    accepted = Nx.as_type(second, :f32) > minimum_f * penalties[2]
+    denominator = lower + upper - 2 * minimum_f
+    correction = Nx.clip((lower - upper) / (2 * Nx.max(denominator, 1)), -0.5, 0.5)
+
+    refine =
+      denominator > 0 and winner > 0 and winner < band - 1 and
+        winner_d < Nx.min(disparities - 1, x)
+
+    disparity = Nx.as_type(winner_d, :f32) + Nx.select(refine, correction, 0.0)
+
+    key =
+      Nx.bitwise_or(Nx.left_shift(Nx.as_type(minimum, :u32), 16), Nx.as_type(winner_d, :u32))
+
+    {Nx.select(accepted, disparity, -1.0) |> Nx.squeeze(axes: [2]),
+     Nx.select(accepted, key, Nx.u32(@invalid_key)) |> Nx.squeeze(axes: [2])}
+  end
 
   # The reference implementation, and the block's default where the shaders
   # do not apply

@@ -112,6 +112,66 @@ defmodule NxStereoTest do
     assert Nx.to_flat_list(wide) == Nx.to_flat_list(Nx.Defn.jit(fun).(left, right))
   end
 
+  describe "sgm_band/4" do
+    for paths <- [3, 8] do
+      test "a band covering every disparity matches as sgm/3 with #{paths} paths" do
+        {left, right} = layered(24, 160, 4.5, 14.25)
+        opts = [disparities: 64, p1: 7, p2: 70, uniqueness: 1.05, paths: unquote(paths)]
+        base = Nx.broadcast(Nx.s32(0), {24, 160})
+
+        band =
+          Nx.Defn.jit(&NxStereo.sgm_band(&1, &2, &3, Keyword.put(opts, :band, 64))).(
+            left,
+            right,
+            base
+          )
+
+        full = Nx.Defn.jit(&NxStereo.sgm(&1, &2, opts)).(left, right)
+        assert Nx.to_flat_list(band) == Nx.to_flat_list(full)
+      end
+    end
+
+    test "a band around each pixel's disparity finds the full range's matches" do
+      {left, right} = layered(24, 160, 4.5, 14.25)
+      opts = [disparities: 64, p1: 7, p2: 70, uniqueness: 1.05]
+      full = Nx.Defn.jit(&NxStereo.sgm(&1, &2, opts)).(left, right)
+      # Bands of 16 from 4 below each pixel's disparity: they differ across the depth edges.
+      base =
+        full |> Nx.max(0) |> Nx.floor() |> Nx.as_type(:s32) |> Nx.subtract(4) |> Nx.clip(0, 48)
+
+      band =
+        Nx.Defn.jit(&NxStereo.sgm_band(&1, &2, &3, Keyword.put(opts, :band, 16))).(
+          left,
+          right,
+          base
+        )
+
+      pairs = Enum.zip(Nx.to_flat_list(band), Nx.to_flat_list(full))
+      both = Enum.filter(pairs, fn {a, b} -> a >= 0 and b >= 0 end)
+      agree = Enum.count(both, fn {a, b} -> abs(a - b) <= 0.5 end)
+
+      assert length(both) >= 0.9 * Enum.count(pairs, fn {_a, b} -> b >= 0 end)
+      assert agree >= 0.99 * length(both)
+    end
+
+    test "validates the band" do
+      {left, right} = pair(16, 80, 3)
+      base = Nx.broadcast(Nx.s32(0), {16, 80})
+
+      assert_raise ArgumentError, ~r/:band must be a multiple of 8/, fn ->
+        NxStereo.sgm_band(left, right, base, band: 12)
+      end
+
+      assert_raise ArgumentError, ~r/:band must be a multiple of 8/, fn ->
+        NxStereo.sgm_band(left, right, base, band: 128, disparities: 64)
+      end
+
+      assert_raise ArgumentError, ~r/base.*s32.*\{16, 80\}/, fn ->
+        NxStereo.sgm_band(left, right, Nx.broadcast(Nx.s32(0), {16, 79}), band: 16)
+      end
+    end
+  end
+
   test "validates its inputs" do
     {left, right} = pair(16, 80, 0)
 
