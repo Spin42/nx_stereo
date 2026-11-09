@@ -109,7 +109,8 @@ defmodule NxStereo.Vulkan do
     tile = 8
     tiled_pixels = width * ceil_div(height, tile) * tile
     pixels = width * height
-    path = Nx.template({div(pixels * band, 4)}, :u32)
+    # 6-bit costs, as band_common.glsl packs them.
+    cost_words = ceil_div(band * 6, 32)
     map = Nx.template({pixels}, :f32)
 
     kernel = fn spirv, workgroups, specialization ->
@@ -135,7 +136,7 @@ defmodule NxStereo.Vulkan do
 
     horizontal_stages = [
       {kernel.(Map.fetch!(@band_spirv, {:band_transpose_costs, band}), tiles, %{}),
-       [:costs, :base], [columns: Nx.template({pixels * (div(band, 4) + 1)}, :u32)]},
+       [:costs, :base], [columns: Nx.template({pixels * (cost_words + 1)}, :u32)]},
       scan.(:band_scan_forward, :rows, 1, [:params, :columns]),
       scan.(:band_scan_reverse, :rows, 1, [:params, :columns, :band_scan_forward])
     ]
@@ -162,7 +163,7 @@ defmodule NxStereo.Vulkan do
              Map.fetch!(@band_spirv, {:band_cost, band}),
              {ceil_div(width, 64), ceil_div(height, 4), 1},
              %{2 => disparities}
-           ), [:features, :base], [costs: path]}
+           ), [:features, :base], [costs: Nx.template({pixels * cost_words}, :u32)]}
         ] ++
           scan_stages ++
           [

@@ -33,16 +33,16 @@ layout(constant_id = 1) const int HEIGHT = 480;
 #endif
 layout(set = 0, binding = 1) readonly buffer Costs { uint costs[]; };
 #if DY == 0
-#define PIXEL_WORDS (WORDS + 1)
+#define PIXEL_WORDS (COST_WORDS + 1)
 #if PAIRED
 layout(set = 0, binding = 2) readonly buffer Partner { uint partner[]; };
 layout(set = 0, binding = 3) writeonly buffer Paths { uint paths[]; };
 #else
 layout(set = 0, binding = 2) writeonly buffer Paths { uint paths[]; };
 #endif
-int base_of(int pixel) { return int(costs[pixel * PIXEL_WORDS + WORDS]); }
+int base_of(int pixel) { return int(costs[pixel * PIXEL_WORDS + COST_WORDS]); }
 #else
-#define PIXEL_WORDS WORDS
+#define PIXEL_WORDS COST_WORDS
 layout(set = 0, binding = 2) readonly buffer Base { int base[]; };
 layout(set = 0, binding = 3) writeonly buffer Paths { uint paths[]; };
 int base_of(int pixel) { return base[pixel]; }
@@ -73,7 +73,7 @@ uint packed(uint previous[BAND], int w) {
 // One step of the recurrence: previous, and its packed bytes, become this
 // pixel's path costs.
 void advance(inout uint previous[BAND], inout uint packed_previous[WORDS], inout int previous_base,
-             int b, uint words[WORDS]) {
+             int b, uint words[COST_WORDS]) {
   // A path entering the image starts from zero, in its own band.
   int delta = previous_base >= 0 ? b - previous_base : 0;
   uint minimum = previous[0];
@@ -99,7 +99,7 @@ void advance(inout uint previous[BAND], inout uint packed_previous[WORDS], inout
   for (int j = 0; j < SPAN; ++j) window[j] = (gathered[j / 4] >> (8 * (j % 4))) & 255u;
 
   for (int k = 0; k < BAND; ++k) {
-    uint cost = (words[k / 4] >> (8 * (k % 4))) & 255u;
+    uint cost = cost_at(words, k);
     uint own = min(window[k + 1], uint(P2));
     uint neighbour = min(window[k], window[k + 2]) + uint(P1);
     previous[k] = min(own, neighbour) + cost;
@@ -118,15 +118,15 @@ void scan(int dx, int dy, int line, int offset) {
 
   int pixel = pixel_at(dx, dy, line, 0);
   int b = pixel >= 0 ? max(base_of(pixel), 0) : 0;
-  uint words[WORDS];
-  for (int w = 0; w < WORDS; ++w) words[w] = pixel >= 0 ? costs[pixel * PIXEL_WORDS + w] : 0u;
+  uint words[COST_WORDS];
+  for (int w = 0; w < COST_WORDS; ++w) words[w] = pixel >= 0 ? costs[pixel * PIXEL_WORDS + w] : 0u;
 
   int steps = dy == 0 ? WIDTH : HEIGHT;
   for (int i = 0; i < steps; ++i) {
     int next_pixel = i + 1 < steps ? pixel_at(dx, dy, line, i + 1) : -1;
     int next_b = next_pixel >= 0 ? max(base_of(next_pixel), 0) : 0;
-    uint next_words[WORDS];
-    for (int w = 0; w < WORDS; ++w) next_words[w] = next_pixel >= 0 ? costs[next_pixel * PIXEL_WORDS + w] : 0u;
+    uint next_words[COST_WORDS];
+    for (int w = 0; w < COST_WORDS; ++w) next_words[w] = next_pixel >= 0 ? costs[next_pixel * PIXEL_WORDS + w] : 0u;
 
     if (pixel >= 0) {
       advance(previous, packed_previous, previous_base, b, words);
@@ -139,7 +139,7 @@ void scan(int dx, int dy, int line, int offset) {
 
     pixel = next_pixel;
     b = next_b;
-    for (int w = 0; w < WORDS; ++w) words[w] = next_words[w];
+    for (int w = 0; w < COST_WORDS; ++w) words[w] = next_words[w];
   }
 }
 

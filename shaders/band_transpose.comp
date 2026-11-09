@@ -10,7 +10,7 @@ layout(constant_id = 0) const int WIDTH = 640;
 layout(constant_id = 1) const int HEIGHT = 480;
 #include "band_common.glsl"
 #define TILE 8
-#define PIXEL_WORDS (WORDS + 1)
+#define PIXEL_WORDS (COST_WORDS + 1)
 layout(set = 0, binding = 0) readonly buffer Source { uint source[]; };
 layout(set = 0, binding = 1) readonly buffer Base { int base[]; };
 layout(set = 0, binding = 2) writeonly buffer Target { uint target[]; };
@@ -25,16 +25,16 @@ void main() {
   int x0 = int(gl_WorkGroupID.x) * TILE;
   int y0 = int(gl_WorkGroupID.y) * TILE;
 
-  for (int m = t; m < TILE * TILE * WORDS; m += 64) {
-    int row = m / (TILE * WORDS), within = m % (TILE * WORDS);
-    int column = within / WORDS, w = within % WORDS;
+  for (int m = t; m < TILE * TILE * COST_WORDS; m += 64) {
+    int row = m / (TILE * COST_WORDS), within = m % (TILE * COST_WORDS);
+    int column = within / COST_WORDS, w = within % COST_WORDS;
     int x = x0 + column, y = y0 + row;
-    tile[slot(column, row, w)] = x < WIDTH && y < HEIGHT ? source[(y * WIDTH + x) * WORDS + w] : 0u;
+    tile[slot(column, row, w)] = x < WIDTH && y < HEIGHT ? source[(y * WIDTH + x) * COST_WORDS + w] : 0u;
   }
   for (int m = t; m < TILE * TILE; m += 64) {
     int row = m / TILE, column = m % TILE;
     int x = x0 + column, y = y0 + row;
-    tile[slot(column, row, WORDS)] = x < WIDTH && y < HEIGHT ? uint(base[y * WIDTH + x]) : 0u;
+    tile[slot(column, row, COST_WORDS)] = x < WIDTH && y < HEIGHT ? uint(base[y * WIDTH + x]) : 0u;
   }
   barrier();
   for (int m = t; m < TILE * TILE * PIXEL_WORDS; m += 64) {
