@@ -27,20 +27,17 @@ defmodule Mix.Tasks.NxStereo.Shaders do
   ]
 
   # sgm_band/4's shaders, by band width: the costs, their column-major copy for the
-  # horizontal scans, a scan per direction ({DX, DY}), the horizontal paths' return
-  # to row-major order and the selection.
+  # horizontal scans, the scans ({DX, DY}, two directions with DX2, DY2) and the
+  # selection.
   @band_stages [
     band_cost: {"band_cost", []},
-    band_transpose_costs: {"band_transpose", ["-DCOSTS=1"]},
-    band_transpose_paths: {"band_transpose", ["-DCOSTS=0"]},
+    band_transpose_costs: {"band_transpose", []},
     band_scan_forward: {"band_scan", ["-DDX=1", "-DDY=0"]},
     band_scan_reverse: {"band_scan", ["-DDX=-1", "-DDY=0", "-DPAIRED=1"]},
     band_scan_down: {"band_scan", ["-DDX=0", "-DDY=1"]},
-    band_scan_up: {"band_scan", ["-DDX=0", "-DDY=-1"]},
-    band_scan_down_right: {"band_scan", ["-DDX=1", "-DDY=1"]},
-    band_scan_down_left: {"band_scan", ["-DDX=-1", "-DDY=1"]},
-    band_scan_up_right: {"band_scan", ["-DDX=1", "-DDY=-1"]},
-    band_scan_up_left: {"band_scan", ["-DDX=-1", "-DDY=-1"]},
+    band_scan_down_up: {"band_scan", ["-DDX=0", "-DDY=1", "-DDX2=0", "-DDY2=-1"]},
+    band_scan_down_diagonals: {"band_scan", ["-DDX=1", "-DDY=1", "-DDX2=-1", "-DDY2=1"]},
+    band_scan_up_diagonals: {"band_scan", ["-DDX=1", "-DDY=-1", "-DDX2=-1", "-DDY2=-1"]},
     band_select: {"band_select", ["-DPATHS=3"]},
     band_select_8: {"band_select", ["-DPATHS=8"]}
   ]

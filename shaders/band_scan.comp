@@ -13,7 +13,8 @@
 // reads band_transpose.comp's column-major costs, each pixel's base as its
 // last word, and writes its paths column-major, so a wave's lines are
 // consecutive in memory as a vertical scan's are; with PAIRED it adds the
-// opposite scan's path bytes to its own.
+// opposite scan's path bytes to its own. With DX2 and DY2, one dispatch
+// scans two directions and writes both volumes, the second after the first.
 layout(local_size_x = 64) in;
 layout(constant_id = 0) const int WIDTH = 640;
 layout(constant_id = 1) const int HEIGHT = 480;
@@ -40,21 +41,21 @@ layout(set = 0, binding = 3) writeonly buffer Paths { uint paths[]; };
 int base_of(int pixel) { return base[pixel]; }
 #endif
 
-int lines() { return DY == 0 ? HEIGHT : (DX == 0 ? WIDTH : WIDTH + HEIGHT - 1); }
+int lines_of(int dx, int dy) { return dy == 0 ? HEIGHT : (dx == 0 ? WIDTH : WIDTH + HEIGHT - 1); }
 
 // The pixel of `line` at step `i`, or -1 outside the image; column-major in a
 // horizontal scan.
-int pixel_at(int line, int i) {
+int pixel_at(int dx, int dy, int line, int i) {
   int x, y;
-  if (DY == 0) {
+  if (dy == 0) {
     y = line;
-    x = DX > 0 ? i : WIDTH - 1 - i;
+    x = dx > 0 ? i : WIDTH - 1 - i;
   } else {
-    y = DY > 0 ? i : HEIGHT - 1 - i;
-    x = DX > 0 ? line - (HEIGHT - 1) + i : (DX < 0 ? line - i : line);
+    y = dy > 0 ? i : HEIGHT - 1 - i;
+    x = dx > 0 ? line - (HEIGHT - 1) + i : (dx < 0 ? line - i : line);
   }
   if (x < 0 || x >= WIDTH) return -1;
-  return DY == 0 ? x * HEIGHT + y : y * WIDTH + x;
+  return dy == 0 ? x * HEIGHT + y : y * WIDTH + x;
 }
 
 // One step of the recurrence: previous becomes this pixel's path costs.
@@ -97,23 +98,20 @@ uint packed(uint previous[BAND], int w) {
          (previous[4 * w + 3] << 24);
 }
 
-void main() {
-  load_params();
-  int line = int(gl_GlobalInvocationID.x);
-  if (line >= lines()) return;
-
+// Scans `line` in the direction (dx, dy), writing its paths at `offset` in Paths.
+void scan(int dx, int dy, int line, int offset) {
   uint previous[BAND];
   for (int k = 0; k < BAND; ++k) previous[k] = 0u;
   int previous_base = -1;
 
-  int pixel = pixel_at(line, 0);
+  int pixel = pixel_at(dx, dy, line, 0);
   int b = pixel >= 0 ? max(base_of(pixel), 0) : 0;
   uint words[WORDS];
   for (int w = 0; w < WORDS; ++w) words[w] = pixel >= 0 ? costs[pixel * PIXEL_WORDS + w] : 0u;
 
-  int steps = DY == 0 ? WIDTH : HEIGHT;
+  int steps = dy == 0 ? WIDTH : HEIGHT;
   for (int i = 0; i < steps; ++i) {
-    int next_pixel = i + 1 < steps ? pixel_at(line, i + 1) : -1;
+    int next_pixel = i + 1 < steps ? pixel_at(dx, dy, line, i + 1) : -1;
     int next_b = next_pixel >= 0 ? max(base_of(next_pixel), 0) : 0;
     uint next_words[WORDS];
     for (int w = 0; w < WORDS; ++w) next_words[w] = next_pixel >= 0 ? costs[next_pixel * PIXEL_WORDS + w] : 0u;
@@ -121,9 +119,9 @@ void main() {
     if (pixel >= 0) {
       advance(previous, previous_base, b, words);
 #if PAIRED
-      for (int w = 0; w < WORDS; ++w) paths[pixel * WORDS + w] = packed(previous, w) + partner[pixel * WORDS + w];
+      for (int w = 0; w < WORDS; ++w) paths[offset + pixel * WORDS + w] = packed(previous, w) + partner[pixel * WORDS + w];
 #else
-      for (int w = 0; w < WORDS; ++w) paths[pixel * WORDS + w] = packed(previous, w);
+      for (int w = 0; w < WORDS; ++w) paths[offset + pixel * WORDS + w] = packed(previous, w);
 #endif
     }
 
@@ -131,4 +129,24 @@ void main() {
     b = next_b;
     for (int w = 0; w < WORDS; ++w) words[w] = next_words[w];
   }
+}
+
+void main() {
+  load_params();
+#ifdef DX2
+  // Two directions in one dispatch, so their lines run together: the first
+  // direction's workgroups, then the second's, whose paths follow the first's.
+  int groups = (lines_of(DX, DY) + 63) / 64;
+  int group = int(gl_WorkGroupID.x), lane = int(gl_LocalInvocationID.x);
+  if (group < groups) {
+    int line = group * 64 + lane;
+    if (line < lines_of(DX, DY)) scan(DX, DY, line, 0);
+  } else {
+    int line = (group - groups) * 64 + lane;
+    if (line < lines_of(DX2, DY2)) scan(DX2, DY2, line, WIDTH * HEIGHT * WORDS);
+  }
+#else
+  int line = int(gl_GlobalInvocationID.x);
+  if (line < lines_of(DX, DY)) scan(DX, DY, line, 0);
+#endif
 }

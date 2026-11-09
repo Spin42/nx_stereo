@@ -15,34 +15,35 @@ layout(constant_id = 2) const int DISPARITIES = 128;
 #include "params.glsl"
 #include "band_common.glsl"
 layout(set = 0, binding = 1) readonly buffer Base { int base[]; };
-// The horizontal paths arrive summed in one volume: PATHS - 1 volumes.
+// The horizontal paths arrive summed in one column-major volume, as the
+// horizontal scans write it; with 8 paths the others
+// arrive two to a buffer, the second volume after the first.
 #define VOLUMES (PATHS - 1)
+#define VOLUME (WIDTH * HEIGHT * WORDS)
 layout(set = 0, binding = 2) readonly buffer Path0 { uint path0[]; };
 layout(set = 0, binding = 3) readonly buffer Path1 { uint path1[]; };
 #if PATHS == 8
 layout(set = 0, binding = 4) readonly buffer Path2 { uint path2[]; };
 layout(set = 0, binding = 5) readonly buffer Path3 { uint path3[]; };
-layout(set = 0, binding = 6) readonly buffer Path4 { uint path4[]; };
-layout(set = 0, binding = 7) readonly buffer Path5 { uint path5[]; };
-layout(set = 0, binding = 8) readonly buffer Path6 { uint path6[]; };
-#define OUTPUT_BINDING 9
+#define OUTPUT_BINDING 6
 #else
 #define OUTPUT_BINDING 4
 #endif
 layout(set = 0, binding = OUTPUT_BINDING) writeonly buffer LeftDisparity { float left_disparity[]; };
 layout(set = 0, binding = OUTPUT_BINDING + 1) writeonly buffer Winners { uint winners[]; };
 
-// The four path bytes of word i summed across the paths.
-uvec4 summed(int i) {
+// Word `i` of the pixel's band summed across the paths, the horizontal sum's
+// at `column_word` of its column-major volume.
+uvec4 summed(int i, int column_word) {
   uint words[VOLUMES];
-  words[0] = path0[i];
+  words[0] = path0[column_word];
   words[1] = path1[i];
 #if PATHS == 8
-  words[2] = path2[i];
-  words[3] = path3[i];
-  words[4] = path4[i];
-  words[5] = path5[i];
-  words[6] = path6[i];
+  words[2] = path1[VOLUME + i];
+  words[3] = path2[i];
+  words[4] = path2[VOLUME + i];
+  words[5] = path3[i];
+  words[6] = path3[VOLUME + i];
 #endif
   uvec4 sum = uvec4(0u);
   for (int p = 0; p < VOLUMES; ++p)
@@ -74,7 +75,7 @@ void main() {
   bool estimated = base[index] >= 0;
   int b = max(base[index], 0);
 
-  uvec4 s = summed(index * WORDS + lane);
+  uvec4 s = summed(index * WORDS + lane, ((index % WIDTH) * HEIGHT + index / WIDTH) * WORDS + lane);
   uint values[4] = uint[4](s.x, s.y, s.z, s.w);
   // Candidates right of the image (d > x) never win.
   for (int c = 0; c < 4; ++c) values[c] += b + 4 * lane + c > x ? 0x8000u : 0u;

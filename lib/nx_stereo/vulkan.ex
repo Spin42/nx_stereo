@@ -25,9 +25,9 @@ defmodule NxStereo.Vulkan do
             {{stage, disparities}, File.read!(path)}
           end)
 
-  @band_stages ~w(band_cost band_transpose_costs band_transpose_paths band_scan_forward band_scan_reverse band_scan_down band_scan_up
-                   band_scan_down_right band_scan_down_left band_scan_up_right
-                   band_scan_up_left band_select band_select_8)a
+  @band_stages ~w(band_cost band_transpose_costs band_scan_forward
+                   band_scan_reverse band_scan_down band_scan_down_up band_scan_down_diagonals
+                   band_scan_up_diagonals band_select band_select_8)a
 
   @band_spirv (for band <- [8, 16, 32, 64], stage <- @band_stages, into: %{} do
                  path = Path.join(@spirv_dir, "#{stage}_b#{band}.spv")
@@ -42,17 +42,16 @@ defmodule NxStereo.Vulkan do
                    {stage, File.read!(path)}
                  end)
 
-  # sgm_band/4's scans, by direction, and how many lines each runs
-  @band_scans [
-    band_scan_forward: :rows,
-    band_scan_reverse: :rows,
-    band_scan_down: :columns,
-    band_scan_up: :columns,
-    band_scan_down_right: :diagonals,
-    band_scan_down_left: :diagonals,
-    band_scan_up_right: :diagonals,
-    band_scan_up_left: :diagonals
-  ]
+  # sgm_band/4's scans besides the horizontal ones, by path count: their lines
+  # and how many directions each dispatch scans, two writing both volumes in turn.
+  @band_scans %{
+    3 => [band_scan_down: {:columns, 1}],
+    8 => [
+      band_scan_down_up: {:columns, 2},
+      band_scan_down_diagonals: {:diagonals, 2},
+      band_scan_up_diagonals: {:diagonals, 2}
+    ]
+  }
 
   @doc false
   # Both s32 images of {height, width} shrunk 2x, each pixel the rounded mean of a 2x2 block
@@ -104,8 +103,8 @@ defmodule NxStereo.Vulkan do
   # Census in the 128-disparity tiles the band shaders read, the band's costs once,
   # a thread per path line, a lane per word of a pixel's band for the selection;
   # consistency and median as build/1. The horizontal scans run over a column-major
-  # copy of the costs, the reverse one adding the forward one's path bytes, and
-  # their sum returns to row-major order for the selection.
+  # copy of the costs, the reverse one adding the forward one's path bytes, and the
+  # selection reads their column-major sum.
   defp build_band(%{height: height, width: width, disparities: disparities, band: band} = config) do
     tile = 8
     tiled_pixels = width * ceil_div(height, tile) * tile
@@ -121,30 +120,32 @@ defmodule NxStereo.Vulkan do
       }
     end
 
-    scans = if config.paths == 8, do: @band_scans, else: Enum.take(@band_scans, 3)
-
     lines = %{rows: height, columns: width, diagonals: width + height - 1}
     tiles = {ceil_div(width, 8), ceil_div(height, 8), 1}
 
-    scan = fn stage, kind, inputs ->
-      {kernel.(Map.fetch!(@band_spirv, {stage, band}), {ceil_div(lines[kind], 64), 1, 1}, %{}),
-       inputs, [{stage, path}]}
+    scan = fn stage, kind, directions, inputs ->
+      volume = Nx.template({div(directions * pixels * band, 4)}, :u32)
+
+      {kernel.(
+         Map.fetch!(@band_spirv, {stage, band}),
+         {directions * ceil_div(lines[kind], 64), 1, 1},
+         %{}
+       ), inputs, [{stage, volume}]}
     end
 
     horizontal_stages = [
       {kernel.(Map.fetch!(@band_spirv, {:band_transpose_costs, band}), tiles, %{}),
        [:costs, :base], [columns: Nx.template({pixels * (div(band, 4) + 1)}, :u32)]},
-      scan.(:band_scan_forward, :rows, [:params, :columns]),
-      scan.(:band_scan_reverse, :rows, [:params, :columns, :band_scan_forward]),
-      {kernel.(Map.fetch!(@band_spirv, {:band_transpose_paths, band}), tiles, %{}),
-       [:band_scan_reverse], [horizontal: path]}
+      scan.(:band_scan_forward, :rows, 1, [:params, :columns]),
+      scan.(:band_scan_reverse, :rows, 1, [:params, :columns, :band_scan_forward])
     ]
 
-    other_scans = Enum.drop(scans, 2)
+    other_scans = Map.fetch!(@band_scans, config.paths)
 
     scan_stages =
       horizontal_stages ++
-        for {stage, kind} <- other_scans, do: scan.(stage, kind, [:params, :costs, :base])
+        for {stage, {kind, directions}} <- other_scans,
+            do: scan.(stage, kind, directions, [:params, :costs, :base])
 
     select = if config.paths == 8, do: :band_select_8, else: :band_select
 
@@ -171,7 +172,7 @@ defmodule NxStereo.Vulkan do
                %{
                  2 => disparities
                }
-             ), [:params, :base, :horizontal | Keyword.keys(other_scans)],
+             ), [:params, :base, :band_scan_reverse | Keyword.keys(other_scans)],
              [disparity: map, winners: Nx.template({pixels}, :u32)]},
             {kernel.(Map.fetch!(@spirv, {:consistency, 128}), {height, 1, 1}, %{}),
              [:disparity, :winners], [consistent: map]},
