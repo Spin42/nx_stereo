@@ -39,19 +39,19 @@ layout(set = 0, binding = 2) readonly buffer Down { uint down[]; };
 layout(set = 0, binding = OUTPUT_BINDING) writeonly buffer LeftDisparity { float left_disparity[]; };
 layout(set = 0, binding = OUTPUT_BINDING + 1) writeonly buffer Winners { uint winners[]; };
 #include "cost_select.glsl"
-// A workgroup's pixels are one tile of each volume. Its threads load the
-// tiles into shared memory as consecutive 32-bit words, the access Adreno
-// GPUs read at full bandwidth, and each lane then takes its own word.
+// A workgroup's pixels are one tile of each volume; each lane reads its own
+// words of it.
 #define UINTS_PER_WORD (PATH_PACK / 4)
-#define TILE_UINTS (TILE_WORDS * UINTS_PER_WORD)
-shared uint tiles[VOLUMES][TILE_UINTS];
-PATH_WORD_TYPE tile_word(int volume, int index) {
-#if PATH_PACK == 8
-  return uvec2(tiles[volume][2 * index], tiles[volume][2 * index + 1]);
-#else
-  return tiles[volume][index];
-#endif
+#if PATHS == 8
+uint volume_uint(int volume, int at) {
+  if (volume == 0) return forward_reverse[at];
+  if (volume == 1) return up_down_right[at];
+  if (volume == 2) return down_left_up_right[at];
+  return down_up_left[at];
 }
+#else
+uint volume_uint(int volume, int at) { return volume == 0 ? forward_reverse[at] : down[at]; }
+#endif
 void main() {
   load_params();
   uint lane = gl_SubgroupInvocationID % LANES;
@@ -59,20 +59,9 @@ void main() {
   int x = int(gl_WorkGroupID.x);
   int row = int(gl_LocalInvocationID.x) / LANES;
   int y = int(gl_WorkGroupID.y) * LINES + row;
-  int first = volume_word(x, int(gl_WorkGroupID.y) * LINES, 0) * UINTS_PER_WORD;
-  for (int i = int(gl_LocalInvocationID.x); i < TILE_UINTS; i += 128) {
-    tiles[0][i] = forward_reverse[first + i];
-#if PATHS == 8
-    tiles[1][i] = up_down_right[first + i];
-    tiles[2][i] = down_left_up_right[first + i];
-    tiles[3][i] = down_up_left[first + i];
-#else
-    tiles[1][i] = down[first + i];
-#endif
-  }
-  barrier();
   // Whole lane groups share a pixel, so the selection's shuffles read active lanes.
   if (y >= HEIGHT) return;
+  int first = volume_word(x, int(gl_WorkGroupID.y) * LINES, 0);
   int index = row * WORDS_PER_PIXEL + int(lane) * WORDS_PER_LANE;
   uint stored[BLOCK], pair[BLOCK], none[BLOCK];
   for (int k = 0; k < BLOCK; ++k) {
@@ -81,8 +70,9 @@ void main() {
   }
   for (int v = 0; v < VOLUMES; ++v) {
     for (int k = 0; k < BLOCK; k += PATH_PACK) {
-      unpack_lane(tile_word(v, index + k / PATH_PACK), pair, k);
-      for (int i = k; i < k + PATH_PACK; ++i) stored[i] += pair[i];
+      int at = (first + index + k / PATH_PACK) * UINTS_PER_WORD;
+      unpack_lane(PATH_WORD_TYPE(volume_uint(v, at), volume_uint(v, at + 1)), pair, k);
+      for (int i = 0; i < PATH_PACK; ++i) stored[k + i] += pair[k + i];
     }
   }
   select_sum(none, y * WIDTH + x, stored, select_geometry(x, lane, base));
