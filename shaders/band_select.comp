@@ -15,37 +15,37 @@ layout(constant_id = 2) const int DISPARITIES = 128;
 #include "params.glsl"
 #include "band_common.glsl"
 layout(set = 0, binding = 1) readonly buffer Base { int base[]; };
+// The horizontal paths arrive summed in one volume: PATHS - 1 volumes.
+#define VOLUMES (PATHS - 1)
 layout(set = 0, binding = 2) readonly buffer Path0 { uint path0[]; };
 layout(set = 0, binding = 3) readonly buffer Path1 { uint path1[]; };
-layout(set = 0, binding = 4) readonly buffer Path2 { uint path2[]; };
 #if PATHS == 8
+layout(set = 0, binding = 4) readonly buffer Path2 { uint path2[]; };
 layout(set = 0, binding = 5) readonly buffer Path3 { uint path3[]; };
 layout(set = 0, binding = 6) readonly buffer Path4 { uint path4[]; };
 layout(set = 0, binding = 7) readonly buffer Path5 { uint path5[]; };
 layout(set = 0, binding = 8) readonly buffer Path6 { uint path6[]; };
-layout(set = 0, binding = 9) readonly buffer Path7 { uint path7[]; };
-#define OUTPUT_BINDING 10
+#define OUTPUT_BINDING 9
 #else
-#define OUTPUT_BINDING 5
+#define OUTPUT_BINDING 4
 #endif
 layout(set = 0, binding = OUTPUT_BINDING) writeonly buffer LeftDisparity { float left_disparity[]; };
 layout(set = 0, binding = OUTPUT_BINDING + 1) writeonly buffer Winners { uint winners[]; };
 
 // The four path bytes of word i summed across the paths.
 uvec4 summed(int i) {
-  uint words[PATHS];
+  uint words[VOLUMES];
   words[0] = path0[i];
   words[1] = path1[i];
-  words[2] = path2[i];
 #if PATHS == 8
+  words[2] = path2[i];
   words[3] = path3[i];
   words[4] = path4[i];
   words[5] = path5[i];
   words[6] = path6[i];
-  words[7] = path7[i];
 #endif
   uvec4 sum = uvec4(0u);
-  for (int p = 0; p < PATHS; ++p)
+  for (int p = 0; p < VOLUMES; ++p)
     sum += uvec4(words[p] & 255u, (words[p] >> 8) & 255u, (words[p] >> 16) & 255u, words[p] >> 24);
   return sum;
 }

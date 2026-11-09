@@ -1,0 +1,70 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// SPDX-License-Identifier: Apache-2.0
+// Moves a band volume between the row-major pixel order of the other band
+// shaders and the column-major order (x * HEIGHT + y) the horizontal scans
+// read and write, a TILE x TILE tile of pixels at a time through shared
+// memory, so both sides move in contiguous runs. With COSTS, row-major costs
+// become column-major with each pixel's base appended as a last word;
+// otherwise the horizontal scans' column-major paths return to row-major order.
+layout(local_size_x = 64) in;
+layout(constant_id = 0) const int WIDTH = 640;
+layout(constant_id = 1) const int HEIGHT = 480;
+#include "band_common.glsl"
+#define TILE 8
+#if COSTS
+#define PIXEL_WORDS (WORDS + 1)
+layout(set = 0, binding = 0) readonly buffer Source { uint source[]; };
+layout(set = 0, binding = 1) readonly buffer Base { int base[]; };
+layout(set = 0, binding = 2) writeonly buffer Target { uint target[]; };
+#else
+#define PIXEL_WORDS WORDS
+layout(set = 0, binding = 0) readonly buffer Source { uint source[]; };
+layout(set = 0, binding = 1) writeonly buffer Target { uint target[]; };
+#endif
+
+// The tile by column, then row; a padding word per column spreads the banks.
+shared uint tile[TILE * (TILE * PIXEL_WORDS + 1)];
+
+int slot(int column, int row, int w) { return column * (TILE * PIXEL_WORDS + 1) + row * PIXEL_WORDS + w; }
+
+void main() {
+  int t = int(gl_LocalInvocationID.x);
+  int x0 = int(gl_WorkGroupID.x) * TILE;
+  int y0 = int(gl_WorkGroupID.y) * TILE;
+
+#if COSTS
+  for (int m = t; m < TILE * TILE * WORDS; m += 64) {
+    int row = m / (TILE * WORDS), within = m % (TILE * WORDS);
+    int column = within / WORDS, w = within % WORDS;
+    int x = x0 + column, y = y0 + row;
+    tile[slot(column, row, w)] = x < WIDTH && y < HEIGHT ? source[(y * WIDTH + x) * WORDS + w] : 0u;
+  }
+  for (int m = t; m < TILE * TILE; m += 64) {
+    int row = m / TILE, column = m % TILE;
+    int x = x0 + column, y = y0 + row;
+    tile[slot(column, row, WORDS)] = x < WIDTH && y < HEIGHT ? uint(base[y * WIDTH + x]) : 0u;
+  }
+  barrier();
+  for (int m = t; m < TILE * TILE * PIXEL_WORDS; m += 64) {
+    int column = m / (TILE * PIXEL_WORDS), within = m % (TILE * PIXEL_WORDS);
+    int row = within / PIXEL_WORDS, w = within % PIXEL_WORDS;
+    int x = x0 + column, y = y0 + row;
+    if (x < WIDTH && y < HEIGHT) target[(x * HEIGHT + y) * PIXEL_WORDS + w] = tile[slot(column, row, w)];
+  }
+#else
+  for (int m = t; m < TILE * TILE * WORDS; m += 64) {
+    int column = m / (TILE * WORDS), within = m % (TILE * WORDS);
+    int row = within / WORDS, w = within % WORDS;
+    int x = x0 + column, y = y0 + row;
+    tile[slot(column, row, w)] = x < WIDTH && y < HEIGHT ? source[(x * HEIGHT + y) * WORDS + w] : 0u;
+  }
+  barrier();
+  for (int m = t; m < TILE * TILE * WORDS; m += 64) {
+    int row = m / (TILE * WORDS), within = m % (TILE * WORDS);
+    int column = within / WORDS, w = within % WORDS;
+    int x = x0 + column, y = y0 + row;
+    if (x < WIDTH && y < HEIGHT) target[(y * WIDTH + x) * WORDS + w] = tile[slot(column, row, w)];
+  }
+#endif
+}
