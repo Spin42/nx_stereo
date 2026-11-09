@@ -154,6 +154,21 @@ defmodule NxStereoTest do
       assert agree >= 0.99 * length(both)
     end
 
+    test "gives no match where the base is negative" do
+      {left, right} = pair(16, 80, 3)
+
+      base =
+        Nx.broadcast(Nx.s32(0), {16, 80})
+        |> Nx.put_slice([0, 40], Nx.broadcast(Nx.s32(-1), {16, 20}))
+
+      opts = [band: 16, p1: 10, p2: 60]
+
+      band = Nx.Defn.jit(&NxStereo.sgm_band(&1, &2, &3, opts)).(left, right, base)
+
+      assert band[[.., 40..59]] |> Nx.to_flat_list() |> Enum.uniq() == [-1.0]
+      assert band[[4..11, 10..30]] |> Nx.greater(0) |> Nx.all() |> Nx.to_number() == 1
+    end
+
     test "validates the band" do
       {left, right} = pair(16, 80, 3)
       base = Nx.broadcast(Nx.s32(0), {16, 80})
@@ -279,6 +294,8 @@ defmodule NxStereoTest do
               |> Nx.as_type(:s32)
               |> Nx.subtract(4)
               |> Nx.clip(0, 48)
+              # Pixels without an estimate
+              |> Nx.put_slice([10, 100], Nx.broadcast(Nx.s32(-1), {8, 30}))
 
         band_opts = Keyword.put(opts, :band, unquote(band))
         sgm_band = &NxStereo.sgm_band(&1, &2, &3, band_opts)

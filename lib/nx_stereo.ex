@@ -147,7 +147,8 @@ defmodule NxStereo do
   only with the `p2` penalty, as a jump. With a band covering every
   disparity and a base of zero, the result is `sgm/3`'s. A narrow band
   around a disparity estimated beforehand, such as a coarser matching's,
-  costs the band's width instead of the full range.
+  costs the band's width instead of the full range. A negative base marks
+  a pixel without an estimate: it is searched from 0 and gets no match.
 
   Takes `sgm/3`'s options and `:band`, 8, 16, 32 or 64; the caller keeps
   `base + band` within `:disparities`. Defaults to 16.
@@ -198,8 +199,9 @@ defmodule NxStereo do
 
   defnp band_n(left, right, base, penalties, opts) do
     disparities = opts[:disparities]
-    costs = band_costs(census(left), census(right), base, opts[:band])
-    sums = band_aggregate(costs, base, penalties, opts)
+    searched = Nx.max(base, 0)
+    costs = band_costs(census(left), census(right), searched, opts[:band])
+    sums = band_aggregate(costs, searched, penalties, opts)
     {disparity, keys} = band_select(sums, base, penalties, opts)
     disparity |> consistency(keys, disparities) |> NxStereo.Image.median(3)
   end
@@ -307,9 +309,11 @@ defmodule NxStereo do
     end
   end
 
-  # select/3 within each pixel's band
+  # select/3 within each pixel's band; a negative base gives no match
   defnp band_select(sums, base, penalties, opts) do
     disparities = opts[:disparities]
+    estimated = Nx.new_axis(base >= 0, 2)
+    base = Nx.max(base, 0)
     {_height, width, band} = Nx.shape(sums)
     k = Nx.iota({1, 1, band})
     d = Nx.new_axis(base, 2) + k
@@ -328,7 +332,7 @@ defmodule NxStereo do
     minimum_f = Nx.as_type(minimum, :f32)
     winner_d = Nx.new_axis(base, 2) + winner
 
-    accepted = Nx.as_type(second, :f32) > minimum_f * penalties[2]
+    accepted = estimated and Nx.as_type(second, :f32) > minimum_f * penalties[2]
     denominator = lower + upper - 2 * minimum_f
     correction = Nx.clip((lower - upper) / (2 * Nx.max(denominator, 1)), -0.5, 0.5)
 

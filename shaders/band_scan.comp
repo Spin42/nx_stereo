@@ -41,7 +41,7 @@ void main() {
     }
     if (x < 0 || x >= WIDTH) continue;
     int pixel = y * WIDTH + x;
-    int b = base[pixel];
+    int b = max(base[pixel], 0);
     // A path entering the image starts from zero, in its own band.
     if (previous_base < 0) previous_base = b;
 

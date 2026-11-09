@@ -53,7 +53,9 @@ void main() {
   int pixel = int(gl_GlobalInvocationID.x);
   if (pixel >= WIDTH * HEIGHT) return;
   int x = pixel % WIDTH;
-  int b = base[pixel];
+  // A negative base marks a pixel without an estimate: no match.
+  bool estimated = base[pixel] >= 0;
+  int b = max(base[pixel], 0);
 
   uint values[BAND];
   for (int w = 0; w < WORDS; ++w) {
@@ -81,7 +83,7 @@ void main() {
   float hi = float(values[min(winner + 1, BAND - 1)]);
   float m = float(minimum);
   int d = b + winner;
-  bool accepted = float(second) > m * UNIQUENESS;
+  bool accepted = estimated && float(second) > m * UNIQUENESS;
   float denominator = lo + hi - 2.0 * m;
   float correction = clamp((lo - hi) / (2.0 * max(denominator, 1.0)), -0.5, 0.5);
   bool refine = denominator > 0.0 && winner > 0 && winner < BAND - 1 && d < min(DISPARITIES - 1, x);
