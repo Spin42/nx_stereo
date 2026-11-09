@@ -5,35 +5,51 @@
 // NxStereo.sgm_band/4's matching costs, computed once for every path: the
 // Hamming distance between a pixel's left census and the right census of each
 // candidate in its band, a byte per candidate, packed as the paths are. A
-// workgroup covers FEATURE_TILE rows of 64 / FEATURE_TILE columns, so its
-// census loads are contiguous.
+// workgroup covers 64 pixels of a row: it loads the right census of every
+// column they can reach once, into shared memory, and writes its costs as
+// consecutive words.
 layout(local_size_x = 64) in;
 layout(constant_id = 0) const int WIDTH = 640;
 layout(constant_id = 1) const int HEIGHT = 480;
+layout(constant_id = 2) const int DISPARITIES = 128;
 #include "band_common.glsl"
-#define COLUMNS (64 / FEATURE_TILE)
 // census_pair.comp's features as halves: a pixel's left census, then its right.
 layout(set = 0, binding = 0) readonly buffer Features { uvec2 features[]; };
 layout(set = 0, binding = 1) readonly buffer Base { int base[]; };
 layout(set = 0, binding = 2) writeonly buffer Costs { uint costs[]; };
 
-void main() {
-  int local = int(gl_LocalInvocationID.x);
-  int x = int(gl_WorkGroupID.x) * COLUMNS + local / FEATURE_TILE;
-  int y = int(gl_WorkGroupID.y) * FEATURE_TILE + local % FEATURE_TILE;
-  if (x >= WIDTH || y >= HEIGHT) return;
-  int pixel = y * WIDTH + x;
-  int b = max(base[pixel], 0);
-  uvec2 centre = features[2 * feature_index(x, y)];
+// Columns first .. first + 63 + DISPARITIES - 1, first = the workgroup's - (DISPARITIES - 1).
+shared uvec2 right_census[64 + DISPARITIES - 1];
+shared uint words[64 * WORDS];
 
-  for (int w = 0; w < WORDS; ++w) {
-    uint word = 0u;
-    for (int c = 0; c < 4; ++c) {
-      int source = x - (b + 4 * w + c);
-      // Right features left of the image are zero, as libSGM pads them.
-      uvec2 right = source >= 0 ? features[2 * feature_index(source, y) + 1] : uvec2(0u);
-      word |= (bitCount(centre.x ^ right.x) + bitCount(centre.y ^ right.y)) << (8 * c);
-    }
-    costs[pixel * WORDS + w] = word;
+void main() {
+  int t = int(gl_LocalInvocationID.x);
+  int y = int(gl_WorkGroupID.y);
+  int start = int(gl_WorkGroupID.x) * 64;
+  int x = start + t;
+  int first = start - (DISPARITIES - 1);
+
+  for (int m = t; m < 64 + DISPARITIES - 1; m += 64) {
+    int column = first + m;
+    // Right features left of the image are zero, as libSGM pads them.
+    right_census[m] = column >= 0 && column < WIDTH ? features[2 * feature_index(column, y) + 1] : uvec2(0u);
   }
+  barrier();
+
+  if (x < WIDTH) {
+    int b = max(base[y * WIDTH + x], 0);
+    uvec2 centre = features[2 * feature_index(x, y)];
+    for (int w = 0; w < WORDS; ++w) {
+      uint word = 0u;
+      for (int c = 0; c < 4; ++c) {
+        uvec2 right = right_census[x - (b + 4 * w + c) - first];
+        word |= (bitCount(centre.x ^ right.x) + bitCount(centre.y ^ right.y)) << (8 * c);
+      }
+      words[t * WORDS + w] = word;
+    }
+  }
+  barrier();
+
+  for (int m = t; m < 64 * WORDS; m += 64)
+    if (start + m / WORDS < WIDTH) costs[(y * WIDTH + start) * WORDS + m] = words[m];
 }

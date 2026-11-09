@@ -56,8 +56,8 @@ defmodule NxStereo.Vulkan do
   end
 
   # Census in the 128-disparity tiles the band shaders read, the band's costs once,
-  # a thread per path line, a thread per pixel for the selection; consistency and
-  # median as build/1.
+  # a thread per path line, a lane per word of a pixel's band for the selection;
+  # consistency and median as build/1.
   defp build_band(%{height: height, width: width, disparities: disparities, band: band} = config) do
     tile = 8
     tiled_pixels = width * ceil_div(height, tile) * tile
@@ -99,15 +99,19 @@ defmodule NxStereo.Vulkan do
            ), [:left, :right], [features: Nx.template({tiled_pixels * 4}, :u32)]},
           {kernel.(
              Map.fetch!(@band_spirv, {:band_cost, band}),
-             {ceil_div(width, div(64, tile)), ceil_div(height, tile), 1},
-             %{}
+             {ceil_div(width, 64), height, 1},
+             %{2 => disparities}
            ), [:features, :base], [costs: path]}
         ] ++
           scan_stages ++
           [
-            {kernel.(Map.fetch!(@band_spirv, {select, band}), {ceil_div(pixels, 64), 1, 1}, %{
-               2 => disparities
-             }), [:params, :base | Keyword.keys(scans)],
+            {kernel.(
+               Map.fetch!(@band_spirv, {select, band}),
+               {ceil_div(pixels * div(band, 4), 64), 1, 1},
+               %{
+                 2 => disparities
+               }
+             ), [:params, :base | Keyword.keys(scans)],
              [disparity: map, winners: Nx.template({pixels}, :u32)]},
             {kernel.(Map.fetch!(@spirv, {:consistency, 128}), {height, 1, 1}, %{}),
              [:disparity, :winners], [consistent: map]},
