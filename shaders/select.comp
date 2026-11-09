@@ -7,9 +7,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Selection over the stored paths, every pixel in parallel: a workgroup takes
 // the LINES pixels of one tile column, so its loads are contiguous, and each
-// lane group sums the 3 or 8 (PATHS) paths and selects as cost_select.glsl.
-// The paths come summed in pairs: Adreno GPUs slow down sharply when a kernel
-// reads more than a few volumes at once.
+// lane group sums the 8 paths and selects as cost_select.glsl. The paths come
+// summed in pairs: Adreno GPUs slow down sharply when a kernel reads more than
+// a few volumes at once. The 3-path selection runs in cost_line.comp's
+// vertical scan.
 layout(local_size_x = 128) in;
 // Image size is a specialization constant; the disparity
 // range and lane layout stay compile-time macros.
@@ -17,41 +18,24 @@ layout(constant_id = 0) const int WIDTH = 640;
 layout(constant_id = 1) const int HEIGHT = 480;
 #include "params.glsl"
 #include "cost_dp.glsl"
-#ifndef PATHS
-#define PATHS 3
-#endif
 // The paths summed in pairs by the paired scans, read as 32-bit words.
-#if PATHS == 8
 #define VOLUMES 4
-#define OUTPUT_BINDING 5
-#else
-#define VOLUMES 2
-#define OUTPUT_BINDING 3
-#endif
 layout(set = 0, binding = 1) readonly buffer ForwardReverse { uint forward_reverse[]; };
-#if PATHS == 8
 layout(set = 0, binding = 2) readonly buffer UpDownRight { uint up_down_right[]; };
 layout(set = 0, binding = 3) readonly buffer DownLeftUpRight { uint down_left_up_right[]; };
 layout(set = 0, binding = 4) readonly buffer DownUpLeft { uint down_up_left[]; };
-#else
-layout(set = 0, binding = 2) readonly buffer Down { uint down[]; };
-#endif
-layout(set = 0, binding = OUTPUT_BINDING) writeonly buffer LeftDisparity { float left_disparity[]; };
-layout(set = 0, binding = OUTPUT_BINDING + 1) writeonly buffer Winners { uint winners[]; };
+layout(set = 0, binding = 5) writeonly buffer LeftDisparity { float left_disparity[]; };
+layout(set = 0, binding = 6) writeonly buffer Winners { uint winners[]; };
 #include "cost_select.glsl"
 // A workgroup's pixels are one tile of each volume; each lane reads its own
 // words of it.
 #define UINTS_PER_WORD (PATH_PACK / 4)
-#if PATHS == 8
 uint volume_uint(int volume, int at) {
   if (volume == 0) return forward_reverse[at];
   if (volume == 1) return up_down_right[at];
   if (volume == 2) return down_left_up_right[at];
   return down_up_left[at];
 }
-#else
-uint volume_uint(int volume, int at) { return volume == 0 ? forward_reverse[at] : down[at]; }
-#endif
 void main() {
   load_params();
   uint lane = gl_SubgroupInvocationID % LANES;

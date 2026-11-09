@@ -16,12 +16,12 @@ defmodule Mix.Tasks.NxStereo.Shaders do
     cost_reverse: {"cost_scan", ["-DPAIRED=1"]},
     cost_down: {"cost_line", ["-DSTEP_X=0", "-DSTEP_Y=1"]},
     cost_up: {"cost_line", ["-DSTEP_X=0", "-DSTEP_Y=-1"]},
+    cost_down_select: {"cost_line", ["-DSTEP_X=0", "-DSTEP_Y=1", "-DSELECT=1"]},
     cost_down_right: {"cost_line", ["-DSTEP_X=1", "-DSTEP_Y=1", "-DPAIRED=1"]},
     cost_down_left: {"cost_line", ["-DSTEP_X=-1", "-DSTEP_Y=1"]},
     cost_up_right: {"cost_line", ["-DSTEP_X=1", "-DSTEP_Y=-1", "-DPAIRED=1"]},
     cost_up_left: {"cost_line", ["-DSTEP_X=-1", "-DSTEP_Y=-1", "-DPAIRED=1"]},
-    select: {"select", []},
-    select_8: {"select", ["-DPATHS=8"]},
+    select_8: {"select", []},
     consistency: {"consistency_projected", []},
     median: {"filter", []}
   ]
