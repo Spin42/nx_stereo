@@ -80,7 +80,7 @@ defmodule NxStereo.Vulkan do
     if Code.ensure_loaded?(NxIREE.Vulkan.Pipeline) do
       kernel = %NxIREE.Vulkan.Kernel{
         spirv: @coarse_spirv.band_base,
-        workgroups: {ceil_div(height * width, 64), 1, 1},
+        workgroups: {ceil_div(div(height, 2) * div(width, 2), 64), 1, 1},
         specialization: %{0 => width, 1 => height, 2 => margin, 3 => max_base}
       }
 

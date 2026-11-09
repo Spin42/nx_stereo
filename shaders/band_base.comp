@@ -13,10 +13,11 @@ layout(set = 0, binding = 0) readonly buffer Coarse { float coarse[]; };
 layout(set = 0, binding = 1) writeonly buffer Base { int base[]; };
 
 void main() {
-  int i = int(gl_GlobalInvocationID.x);
-  if (i >= WIDTH * HEIGHT) return;
+  // A thread per coarse pixel, writing its 2x2 block of full-size bases.
   int coarse_width = WIDTH / 2, coarse_height = HEIGHT / 2;
-  int cx = (i % WIDTH) / 2, cy = (i / WIDTH) / 2;
+  int i = int(gl_GlobalInvocationID.x);
+  if (i >= coarse_width * coarse_height) return;
+  int cx = i % coarse_width, cy = i / coarse_width;
   float lowest = 1.0e9;
   for (int dy = -1; dy <= 1; ++dy) {
     for (int dx = -1; dx <= 1; ++dx) {
@@ -26,5 +27,10 @@ void main() {
       if (value >= 0.0) lowest = min(lowest, value);
     }
   }
-  base[i] = lowest < 1.0e9 ? clamp(int(floor(lowest * 2.0)) - MARGIN, 0, MAX_BASE) : -1;
+  int b = lowest < 1.0e9 ? clamp(int(floor(lowest * 2.0)) - MARGIN, 0, MAX_BASE) : -1;
+  int at = 2 * cy * WIDTH + 2 * cx;
+  base[at] = b;
+  base[at + 1] = b;
+  base[at + WIDTH] = b;
+  base[at + WIDTH + 1] = b;
 }
