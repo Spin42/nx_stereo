@@ -149,9 +149,8 @@ defmodule NxStereo do
   around a disparity estimated beforehand, such as a coarser matching's,
   costs the band's width instead of the full range.
 
-  Takes `sgm/3`'s options and `:band`, a multiple of 8 up to
-  `:disparities`; the caller keeps `base + band` within `:disparities`.
-  Defaults to 16.
+  Takes `sgm/3`'s options and `:band`, 8, 16, 32 or 64; the caller keeps
+  `base + band` within `:disparities`. Defaults to 16.
   """
   deftransform sgm_band(left, right, base, opts \\ []) do
     opts =
@@ -167,9 +166,8 @@ defmodule NxStereo do
     config = config!(left, right, Keyword.delete(opts, :band))
     band = opts[:band]
 
-    unless is_integer(band) and band >= 8 and rem(band, 8) == 0 and band <= config.disparities do
-      raise ArgumentError,
-            ":band must be a multiple of 8 up to :disparities (#{config.disparities}), got #{inspect(band)}"
+    unless band in [8, 16, 32, 64] do
+      raise ArgumentError, ":band must be 8, 16, 32 or 64, got #{inspect(band)}"
     end
 
     base_template = Nx.to_template(base)
@@ -182,13 +180,20 @@ defmodule NxStereo do
 
     penalties = Nx.stack(Enum.map([opts[:p1], opts[:p2], opts[:uniqueness]], &to_f32/1))
 
-    band_n(
-      Nx.as_type(left, :s32),
-      Nx.as_type(right, :s32),
-      base,
-      penalties,
-      Map.to_list(Map.put(config, :band, band))
-    )
+    config = Map.put(config, :band, band)
+    left = Nx.as_type(left, :s32)
+    right = Nx.as_type(right, :s32)
+    output = Nx.template({config.height, config.width}, :f32)
+
+    case NxStereo.Vulkan.band_pipeline(config) do
+      nil ->
+        band_n(left, right, base, penalties, Map.to_list(config))
+
+      pipeline ->
+        Nx.block(pipeline, [left, right, penalties, base], output, fn _, l, r, p, b ->
+          band_n(l, r, b, p, Map.to_list(config))
+        end)
+    end
   end
 
   defnp band_n(left, right, base, penalties, opts) do

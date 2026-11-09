@@ -158,12 +158,12 @@ defmodule NxStereoTest do
       {left, right} = pair(16, 80, 3)
       base = Nx.broadcast(Nx.s32(0), {16, 80})
 
-      assert_raise ArgumentError, ~r/:band must be a multiple of 8/, fn ->
+      assert_raise ArgumentError, ~r/:band must be 8, 16, 32 or 64/, fn ->
         NxStereo.sgm_band(left, right, base, band: 12)
       end
 
-      assert_raise ArgumentError, ~r/:band must be a multiple of 8/, fn ->
-        NxStereo.sgm_band(left, right, base, band: 128, disparities: 64)
+      assert_raise ArgumentError, ~r/:band must be 8, 16, 32 or 64/, fn ->
+        NxStereo.sgm_band(left, right, base, band: 128, disparities: 128)
       end
 
       assert_raise ArgumentError, ~r/base.*s32.*\{16, 80\}/, fn ->
@@ -248,6 +248,53 @@ defmodule NxStereoTest do
           # GLSL's f32 division need not be correctly rounded, so subpixel
           # values may differ in the last bit (here, at most two ulps); every
           # decision must agree.
+          mismatches =
+            Enum.zip(gpu, reference)
+            |> Enum.with_index()
+            |> Enum.reject(fn {{a, b}, _} ->
+              a == -1.0 == (b == -1.0) and trunc(a) == trunc(b) and
+                abs(a - b) <= 2.4e-7 * max(abs(b), 1.0)
+            end)
+
+          assert mismatches == [],
+                 "pixels differ on #{device.uri}: #{inspect(Enum.take(mismatches, 20))}"
+        end
+      end
+    end
+
+    for band <- [16, 64], paths <- [3, 8] do
+      test "the band shaders match the reference with a band of #{band}, #{paths} paths",
+           %{devices: devices} do
+        {left, right} = layered(37, 203, 4.5, 14.25)
+        opts = [disparities: 64, p1: 7, p2: 70, uniqueness: 1.05, paths: unquote(paths)]
+        full = Nx.Defn.jit(&NxStereo.sgm(&1, &2, opts), compiler: EXLA).(left, right)
+
+        base =
+          if unquote(band) == 64,
+            do: Nx.broadcast(Nx.s32(0), {37, 203}),
+            else:
+              full
+              |> Nx.max(0)
+              |> Nx.floor()
+              |> Nx.as_type(:s32)
+              |> Nx.subtract(4)
+              |> Nx.clip(0, 48)
+
+        band_opts = Keyword.put(opts, :band, unquote(band))
+        sgm_band = &NxStereo.sgm_band(&1, &2, &3, band_opts)
+
+        reference =
+          Nx.Defn.jit(sgm_band, compiler: EXLA).(left, right, base) |> Nx.to_flat_list()
+
+        for device <- devices do
+          gpu =
+            Nx.Defn.jit(sgm_band,
+              compiler: NxIREE.Compiler,
+              iree_runtime_options: [device: device]
+            ).(left, right, base)
+            |> Nx.backend_transfer(Nx.BinaryBackend)
+            |> Nx.to_flat_list()
+
           mismatches =
             Enum.zip(gpu, reference)
             |> Enum.with_index()

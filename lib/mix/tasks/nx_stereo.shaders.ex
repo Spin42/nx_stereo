@@ -26,6 +26,20 @@ defmodule Mix.Tasks.NxStereo.Shaders do
     median: {"filter", []}
   ]
 
+  # sgm_band/4's shaders, by band width: a scan per direction ({DX, DY}) and the selection.
+  @band_stages [
+    band_scan_forward: {"band_scan", ["-DDX=1", "-DDY=0"]},
+    band_scan_reverse: {"band_scan", ["-DDX=-1", "-DDY=0"]},
+    band_scan_down: {"band_scan", ["-DDX=0", "-DDY=1"]},
+    band_scan_up: {"band_scan", ["-DDX=0", "-DDY=-1"]},
+    band_scan_down_right: {"band_scan", ["-DDX=1", "-DDY=1"]},
+    band_scan_down_left: {"band_scan", ["-DDX=-1", "-DDY=1"]},
+    band_scan_up_right: {"band_scan", ["-DDX=1", "-DDY=-1"]},
+    band_scan_up_left: {"band_scan", ["-DDX=-1", "-DDY=-1"]},
+    band_select: {"band_select", ["-DPATHS=3"]},
+    band_select_8: {"band_select", ["-DPATHS=8"]}
+  ]
+
   @impl true
   def run(_args) do
     compiler =
@@ -44,10 +58,26 @@ defmodule Mix.Tasks.NxStereo.Shaders do
             "-DFEATURE_TILE=#{div(1024, disparities)}"
           ] ++ flags ++ ["-o", output, "shaders/#{source}.comp"]
 
-      case System.cmd(compiler, args, stderr_to_stdout: true) do
-        {_, 0} -> Mix.shell().info("compiled #{output}")
-        {log, _} -> Mix.raise("glslangValidator failed on #{source}:\n" <> log)
-      end
+      compile!(compiler, args, source, output)
+    end
+
+    # The band shaders read the census features in the 128-disparity tiles.
+    for band <- [8, 16, 32, 64], {stage, {source, flags}} <- @band_stages do
+      output = "priv/spirv/#{stage}_b#{band}.spv"
+
+      args =
+        ~w(-V --target-env vulkan1.1 -S comp) ++
+          ["-DBAND=#{band}", "-DFEATURE_TILE=8"] ++
+          flags ++ ["-o", output, "shaders/#{source}.comp"]
+
+      compile!(compiler, args, source, output)
+    end
+  end
+
+  defp compile!(compiler, args, source, output) do
+    case System.cmd(compiler, args, stderr_to_stdout: true) do
+      {_, 0} -> Mix.shell().info("compiled #{output}")
+      {log, _} -> Mix.raise("glslangValidator failed on #{source}:\n" <> log)
     end
   end
 end

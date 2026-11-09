@@ -1,0 +1,92 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Copyright 2016 Fixstars Corporation
+// SPDX-License-Identifier: Apache-2.0
+// NxStereo.sgm_band/4's selection, a thread per pixel: the sum of the 3 or 8
+// (PATHS) paths over the pixel's band, the winner, the uniqueness check and
+// the parabolic subpixel refinement, with the same winner keys as
+// cost_select.glsl for the consistency check.
+layout(local_size_x = 64) in;
+layout(constant_id = 0) const int WIDTH = 640;
+layout(constant_id = 1) const int HEIGHT = 480;
+layout(constant_id = 2) const int DISPARITIES = 128;
+#include "params.glsl"
+#include "band_common.glsl"
+layout(set = 0, binding = 1) readonly buffer Base { int base[]; };
+layout(set = 0, binding = 2) readonly buffer Path0 { uint path0[]; };
+layout(set = 0, binding = 3) readonly buffer Path1 { uint path1[]; };
+layout(set = 0, binding = 4) readonly buffer Path2 { uint path2[]; };
+#if PATHS == 8
+layout(set = 0, binding = 5) readonly buffer Path3 { uint path3[]; };
+layout(set = 0, binding = 6) readonly buffer Path4 { uint path4[]; };
+layout(set = 0, binding = 7) readonly buffer Path5 { uint path5[]; };
+layout(set = 0, binding = 8) readonly buffer Path6 { uint path6[]; };
+layout(set = 0, binding = 9) readonly buffer Path7 { uint path7[]; };
+#define OUTPUT_BINDING 10
+#else
+#define OUTPUT_BINDING 5
+#endif
+layout(set = 0, binding = OUTPUT_BINDING) writeonly buffer LeftDisparity { float left_disparity[]; };
+layout(set = 0, binding = OUTPUT_BINDING + 1) writeonly buffer Winners { uint winners[]; };
+
+// The four path bytes of word i summed across the paths.
+uvec4 summed(int i) {
+  uint words[PATHS];
+  words[0] = path0[i];
+  words[1] = path1[i];
+  words[2] = path2[i];
+#if PATHS == 8
+  words[3] = path3[i];
+  words[4] = path4[i];
+  words[5] = path5[i];
+  words[6] = path6[i];
+  words[7] = path7[i];
+#endif
+  uvec4 sum = uvec4(0u);
+  for (int p = 0; p < PATHS; ++p)
+    sum += uvec4(words[p] & 255u, (words[p] >> 8) & 255u, (words[p] >> 16) & 255u, words[p] >> 24);
+  return sum;
+}
+
+void main() {
+  load_params();
+  int pixel = int(gl_GlobalInvocationID.x);
+  if (pixel >= WIDTH * HEIGHT) return;
+  int x = pixel % WIDTH;
+  int b = base[pixel];
+
+  uint values[BAND];
+  for (int w = 0; w < WORDS; ++w) {
+    uvec4 s = summed(pixel * WORDS + w);
+    values[4 * w] = s.x;
+    values[4 * w + 1] = s.y;
+    values[4 * w + 2] = s.z;
+    values[4 * w + 3] = s.w;
+  }
+  // Candidates right of the image (d > x) never win.
+  for (int k = 0; k < BAND; ++k) values[k] += b + k > x ? 0x8000u : 0u;
+
+  int winner = 0;
+  uint minimum = values[0];
+  for (int k = 1; k < BAND; ++k) {
+    if (values[k] < minimum) {
+      minimum = values[k];
+      winner = k;
+    }
+  }
+  uint second = 0xffffffffu;
+  for (int k = 0; k < BAND; ++k) second = abs(k - winner) <= 1 ? second : min(second, values[k]);
+
+  float lo = float(values[max(winner - 1, 0)]);
+  float hi = float(values[min(winner + 1, BAND - 1)]);
+  float m = float(minimum);
+  int d = b + winner;
+  bool accepted = float(second) > m * UNIQUENESS;
+  float denominator = lo + hi - 2.0 * m;
+  float correction = clamp((lo - hi) / (2.0 * max(denominator, 1.0)), -0.5, 0.5);
+  bool refine = denominator > 0.0 && winner > 0 && winner < BAND - 1 && d < min(DISPARITIES - 1, x);
+  float disparity = float(d) + (refine ? correction : 0.0);
+
+  left_disparity[pixel] = accepted ? disparity : -1.0;
+  winners[pixel] = accepted ? (minimum << 16) | uint(d) : 0xffffffffu;
+}

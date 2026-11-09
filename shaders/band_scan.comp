@@ -1,0 +1,73 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Copyright 2016 Fixstars Corporation
+// SPDX-License-Identifier: Apache-2.0
+// NxStereo.sgm_band/4's path recurrence along one direction, a thread per
+// line holding the line's whole band. The direction moves DX columns and DY
+// rows a step: DY = 0 is a horizontal scan of a row, otherwise a vertical
+// (DX = 0) or diagonal scan visiting rows downwards (DY = 1) or upwards.
+// Matching costs are computed from the census features at each step. The
+// previous pixel's normalized costs move to this pixel's band by disparity,
+// P2 standing for a candidate its band lacks.
+layout(local_size_x = 64) in;
+layout(constant_id = 0) const int WIDTH = 640;
+layout(constant_id = 1) const int HEIGHT = 480;
+#include "params.glsl"
+#include "band_common.glsl"
+layout(set = 0, binding = 1) readonly buffer Features { uvec4 features[]; };
+layout(set = 0, binding = 2) readonly buffer Base { int base[]; };
+layout(set = 0, binding = 3) writeonly buffer Paths { uint paths[]; };
+
+void main() {
+  load_params();
+  int line = int(gl_GlobalInvocationID.x);
+  int lines = DY == 0 ? HEIGHT : (DX == 0 ? WIDTH : WIDTH + HEIGHT - 1);
+  if (line >= lines) return;
+  int steps = DY == 0 ? WIDTH : HEIGHT;
+
+  uint previous[BAND];
+  for (int k = 0; k < BAND; ++k) previous[k] = 0u;
+  int previous_base = -1;
+  uint window[BAND + 2];
+
+  for (int i = 0; i < steps; ++i) {
+    int x, y;
+    if (DY == 0) {
+      y = line;
+      x = DX > 0 ? i : WIDTH - 1 - i;
+    } else {
+      y = DY > 0 ? i : HEIGHT - 1 - i;
+      x = DX > 0 ? line - (HEIGHT - 1) + i : (DX < 0 ? line - i : line);
+    }
+    if (x < 0 || x >= WIDTH) continue;
+    int pixel = y * WIDTH + x;
+    int b = base[pixel];
+    // A path entering the image starts from zero, in its own band.
+    if (previous_base < 0) previous_base = b;
+
+    uint minimum = previous[0];
+    for (int k = 1; k < BAND; ++k) minimum = min(minimum, previous[k]);
+    int delta = b - previous_base;
+    for (int j = 0; j < BAND + 2; ++j) {
+      int index = j - 1 + delta;
+      window[j] = index >= 0 && index < BAND ? previous[index] - minimum : uint(P2);
+    }
+
+    uvec4 centre = features[feature_index(x, y)];
+    for (int k = 0; k < BAND; ++k) {
+      int source = x - (b + k);
+      // Right features left of the image are zero, as libSGM pads them.
+      uvec2 right = source >= 0 ? features[feature_index(source, y)].zw : uvec2(0u);
+      uint cost = bitCount(centre.x ^ right.x) + bitCount(centre.y ^ right.y);
+      uint own = min(window[k + 1], uint(P2));
+      uint neighbour = min(window[k], window[k + 2]) + uint(P1);
+      previous[k] = min(own, neighbour) + cost;
+    }
+    previous_base = b;
+
+    for (int w = 0; w < WORDS; ++w) {
+      paths[pixel * WORDS + w] = previous[4 * w] | (previous[4 * w + 1] << 8) |
+                                 (previous[4 * w + 2] << 16) | (previous[4 * w + 3] << 24);
+    }
+  }
+}
