@@ -11,7 +11,9 @@ defmodule NxStereo do
   consistency check, and a 3x3 median filter.
 
   `sgm_band/4` does the same within a band of disparities per pixel, for a
-  search refined around an earlier estimate.
+  search refined around an earlier estimate, and `sgm_coarse_to_fine/3`
+  combines both: a matching of the pair shrunk 2x, refined at full
+  resolution within a band around it.
 
   It is written in `Nx.Defn` and runs on every Nx backend and compiler.
   Compiled by `NxIREE.Compiler` for Vulkan, it runs as compute shaders
@@ -135,6 +137,103 @@ defmodule NxStereo do
   end
 
   defp tensor?(value), do: is_struct(value, Nx.Tensor)
+
+  @doc """
+  Computes the disparity map of `left` against `right` coarse to fine:
+  `sgm/3` over the pair shrunk 2x with 64 disparities, then `sgm_band/4`
+  at full resolution over the 128-disparity range, each pixel searched
+  within a band of `:band` disparities.
+
+  A pixel's band starts `:margin` disparities below twice the lowest
+  coarse disparity around it, in its 3x3 neighbourhood at the coarse
+  scale, so a pixel on a depth edge covers both sides when they are
+  within `band - 2 * margin` disparities of each other. A pixel with no
+  coarse match around it gets none. The matches are mostly `sgm/3`'s at
+  full resolution, for a fraction of its cost; a structure too thin to
+  survive the shrink can take the background's disparity.
+
+  Takes `sgm/3`'s options, `:disparities` being 128, and:
+
+    * `:band` - the band's width, 8, 16, 32 or 64. Defaults to 16.
+    * `:margin` - how far below the coarse estimate a band starts.
+      Defaults to 4.
+    * `:coarse_paths` - the coarse matching's paths, 3 or 8. Defaults to
+      `:paths`.
+
+  Images must have an even height and width.
+  """
+  deftransform sgm_coarse_to_fine(left, right, opts \\ []) do
+    opts =
+      Keyword.validate!(opts,
+        disparities: 128,
+        p1: 8,
+        p2: 64,
+        uniqueness: 1.0526315789473684,
+        paths: 8,
+        band: 16,
+        margin: 4,
+        coarse_paths: nil
+      )
+
+    {height, width} = Nx.shape(left)
+
+    if rem(height, 2) != 0 or rem(width, 2) != 0 do
+      raise ArgumentError,
+            "NxStereo.sgm_coarse_to_fine/3 expects images of even height and width, got #{inspect({height, width})}"
+    end
+
+    if opts[:disparities] != 128 do
+      raise ArgumentError,
+            ":disparities must be 128: the coarse matching takes 64, got #{inspect(opts[:disparities])}"
+    end
+
+    penalties = Keyword.take(opts, [:p1, :p2, :uniqueness])
+
+    coarse =
+      sgm(
+        shrink(left),
+        shrink(right),
+        [disparities: 64, paths: opts[:coarse_paths] || opts[:paths]] ++ penalties
+      )
+
+    base = band_base(coarse, opts[:band], opts[:margin])
+
+    sgm_band(
+      left,
+      right,
+      base,
+      [disparities: 128, paths: opts[:paths], band: opts[:band]] ++ penalties
+    )
+  end
+
+  # The 2x2 average, rounded, in the image's type
+  deftransformp shrink(image) do
+    {height, width} = Nx.shape(image)
+
+    image
+    |> Nx.as_type(:s32)
+    |> Nx.reshape({div(height, 2), 2, div(width, 2), 2})
+    |> Nx.sum(axes: [1, 3])
+    |> Nx.add(2)
+    |> Nx.quotient(4)
+    |> Nx.as_type(Nx.type(image))
+  end
+
+  # Each full-resolution pixel's band base from the coarse disparity: margin
+  # below twice the lowest match in its coarse 3x3 neighbourhood, -1 without one
+  defnp band_base(coarse, band, margin) do
+    {height, width} = Nx.shape(coarse)
+    none = 1.0e9
+    matched = Nx.select(coarse >= 0, coarse, none)
+    lowest = matched |> Nx.pad(none, [{1, 1, 0}, {1, 1, 0}]) |> Nx.window_min({3, 3})
+    start = (Nx.floor(lowest * 2) - margin) |> Nx.as_type(:s32) |> Nx.clip(0, 128 - band)
+    base = Nx.select(lowest < none, start, -1)
+
+    base
+    |> Nx.reshape({height, 1, width, 1})
+    |> Nx.broadcast({height, 2, width, 2})
+    |> Nx.reshape({height * 2, width * 2})
+  end
 
   @doc """
   Computes the disparity map of `left` against `right` as `sgm/3` does,

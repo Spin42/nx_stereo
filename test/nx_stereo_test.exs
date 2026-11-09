@@ -112,6 +112,43 @@ defmodule NxStereoTest do
     assert Nx.to_flat_list(wide) == Nx.to_flat_list(Nx.Defn.jit(fun).(left, right))
   end
 
+  describe "sgm_coarse_to_fine/3" do
+    test "matches a shifted texture as sgm/3 does at full resolution" do
+      {left, right} = pair(32, 240, 37)
+      disparity = Nx.Defn.jit(&NxStereo.sgm_coarse_to_fine(&1, &2, [])).(left, right)
+      full = Nx.Defn.jit(&NxStereo.sgm(&1, &2, disparities: 128)).(left, right)
+
+      assert disparity.shape == {32, 240}
+      assert interior(disparity, 140) == interior(full, 140)
+      assert Enum.count(interior(disparity, 140), &(abs(&1 - 37.0) < 0.1)) >= 2300
+    end
+
+    test "agrees with sgm/3 at full resolution across depth edges" do
+      {left, right} = layered(48, 240, 20.5, 60.25)
+      opts = [disparities: 128, p1: 7, p2: 70, uniqueness: 1.05]
+      full = Nx.Defn.jit(&NxStereo.sgm(&1, &2, opts)).(left, right) |> Nx.to_flat_list()
+
+      fine =
+        Nx.Defn.jit(&NxStereo.sgm_coarse_to_fine(&1, &2, opts)).(left, right) |> Nx.to_flat_list()
+
+      both = Enum.zip(fine, full) |> Enum.filter(fn {a, b} -> a >= 0 and b >= 0 end)
+      assert length(both) >= 0.9 * Enum.count(full, &(&1 >= 0))
+      assert Enum.count(both, fn {a, b} -> abs(a - b) <= 1 end) >= 0.95 * length(both)
+    end
+
+    test "validates its inputs" do
+      {left, right} = pair(16, 80, 3)
+
+      assert_raise ArgumentError, ~r/even height and width/, fn ->
+        NxStereo.sgm_coarse_to_fine(left[0..14], right[0..14])
+      end
+
+      assert_raise ArgumentError, ~r/:disparities must be 128/, fn ->
+        NxStereo.sgm_coarse_to_fine(left, right, disparities: 64)
+      end
+    end
+  end
+
   describe "sgm_band/4" do
     for paths <- [3, 8] do
       test "a band covering every disparity matches as sgm/3 with #{paths} paths" do
@@ -323,6 +360,33 @@ defmodule NxStereoTest do
           assert mismatches == [],
                  "pixels differ on #{device.uri}: #{inspect(Enum.take(mismatches, 20))}"
         end
+      end
+    end
+
+    test "coarse to fine on the shaders matches the reference", %{devices: devices} do
+      {left, right} = layered(48, 240, 20.5, 60.25)
+      fun = &NxStereo.sgm_coarse_to_fine(&1, &2, p1: 7, p2: 70, uniqueness: 1.05)
+      reference = Nx.Defn.jit(fun, compiler: EXLA).(left, right) |> Nx.to_flat_list()
+
+      for device <- devices do
+        gpu =
+          Nx.Defn.jit(fun, compiler: NxIREE.Compiler, iree_runtime_options: [device: device]).(
+            left,
+            right
+          )
+          |> Nx.backend_transfer(Nx.BinaryBackend)
+          |> Nx.to_flat_list()
+
+        mismatches =
+          Enum.zip(gpu, reference)
+          |> Enum.with_index()
+          |> Enum.reject(fn {{a, b}, _} ->
+            a == -1.0 == (b == -1.0) and trunc(a) == trunc(b) and
+              abs(a - b) <= 2.4e-7 * max(abs(b), 1.0)
+          end)
+
+        assert mismatches == [],
+               "pixels differ on #{device.uri}: #{inspect(Enum.take(mismatches, 20))}"
       end
     end
 
