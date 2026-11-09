@@ -25,7 +25,7 @@ defmodule NxStereo.Vulkan do
             {{stage, disparities}, File.read!(path)}
           end)
 
-  @band_stages ~w(band_scan_forward band_scan_reverse band_scan_down band_scan_up
+  @band_stages ~w(band_cost band_scan_forward band_scan_reverse band_scan_down band_scan_up
                    band_scan_down_right band_scan_down_left band_scan_up_right
                    band_scan_up_left band_select band_select_8)a
 
@@ -55,8 +55,9 @@ defmodule NxStereo.Vulkan do
     if Code.ensure_loaded?(NxIREE.Vulkan.Pipeline), do: build_band(config)
   end
 
-  # Census in the 128-disparity tiles the band shaders read, a thread per path
-  # line, a thread per pixel for the selection; consistency and median as build/1.
+  # Census in the 128-disparity tiles the band shaders read, the band's costs once,
+  # a thread per path line, a thread per pixel for the selection; consistency and
+  # median as build/1.
   defp build_band(%{height: height, width: width, disparities: disparities, band: band} = config) do
     tile = 8
     tiled_pixels = width * ceil_div(height, tile) * tile
@@ -78,8 +79,11 @@ defmodule NxStereo.Vulkan do
 
     scan_stages =
       for {stage, kind} <- scans do
-        {kernel.(Map.fetch!(@band_spirv, {stage, band}), {ceil_div(lines[kind], 64), 1, 1}, %{}),
-         [:params, :features, :base], [{stage, path}]}
+        {kernel.(
+           Map.fetch!(@band_spirv, {stage, band}),
+           {ceil_div(lines[kind], 64), 1, 1},
+           %{}
+         ), [:params, :costs, :base], [{stage, path}]}
       end
 
     select = if config.paths == 8, do: :band_select_8, else: :band_select
@@ -92,7 +96,12 @@ defmodule NxStereo.Vulkan do
              Map.fetch!(@spirv, {:census, 128}),
              {ceil_div(width, div(128, tile)), ceil_div(height, 4 * tile), 1},
              %{}
-           ), [:left, :right], [features: Nx.template({tiled_pixels * 4}, :u32)]}
+           ), [:left, :right], [features: Nx.template({tiled_pixels * 4}, :u32)]},
+          {kernel.(
+             Map.fetch!(@band_spirv, {:band_cost, band}),
+             {ceil_div(width, div(64, tile)), ceil_div(height, tile), 1},
+             %{}
+           ), [:features, :base], [costs: path]}
         ] ++
           scan_stages ++
           [

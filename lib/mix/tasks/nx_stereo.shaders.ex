@@ -28,6 +28,7 @@ defmodule Mix.Tasks.NxStereo.Shaders do
 
   # sgm_band/4's shaders, by band width: a scan per direction ({DX, DY}) and the selection.
   @band_stages [
+    band_cost: {"band_cost", []},
     band_scan_forward: {"band_scan", ["-DDX=1", "-DDY=0"]},
     band_scan_reverse: {"band_scan", ["-DDX=-1", "-DDY=0"]},
     band_scan_down: {"band_scan", ["-DDX=0", "-DDY=1"]},

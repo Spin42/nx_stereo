@@ -68,19 +68,24 @@ void main() {
   // Candidates right of the image (d > x) never win.
   for (int k = 0; k < BAND; ++k) values[k] += b + k > x ? 0x8000u : 0u;
 
+  // The winner's neighbours are taken as it is found: every index stays constant.
   int winner = 0;
   uint minimum = values[0];
+  uint below = values[0];
+  uint above = values[1];
   for (int k = 1; k < BAND; ++k) {
     if (values[k] < minimum) {
       minimum = values[k];
       winner = k;
+      below = values[k - 1];
+      above = values[min(k + 1, BAND - 1)];
     }
   }
   uint second = 0xffffffffu;
   for (int k = 0; k < BAND; ++k) second = abs(k - winner) <= 1 ? second : min(second, values[k]);
 
-  float lo = float(values[max(winner - 1, 0)]);
-  float hi = float(values[min(winner + 1, BAND - 1)]);
+  float lo = float(below);
+  float hi = float(above);
   float m = float(minimum);
   int d = b + winner;
   bool accepted = estimated && float(second) > m * UNIQUENESS;

@@ -3,71 +3,106 @@
 // Copyright 2016 Fixstars Corporation
 // SPDX-License-Identifier: Apache-2.0
 // NxStereo.sgm_band/4's path recurrence along one direction, a thread per
-// line holding the line's whole band. The direction moves DX columns and DY
-// rows a step: DY = 0 is a horizontal scan of a row, otherwise a vertical
-// (DX = 0) or diagonal scan visiting rows downwards (DY = 1) or upwards.
-// Matching costs are computed from the census features at each step. The
-// previous pixel's normalized costs move to this pixel's band by disparity,
-// P2 standing for a candidate its band lacks.
+// line holding the line's whole band in registers. The direction moves DX
+// columns and DY rows a step: DY = 0 is a horizontal scan of a row, otherwise
+// a vertical (DX = 0) or diagonal scan visiting rows downwards (DY = 1) or
+// upwards. Matching costs come from band_cost.comp. The previous pixel's
+// normalized costs move to this pixel's band by disparity through a barrel
+// shifter, so every array index is a constant, P2 standing for a candidate its
+// band lacks. A step's loads are issued one step ahead.
 layout(local_size_x = 64) in;
 layout(constant_id = 0) const int WIDTH = 640;
 layout(constant_id = 1) const int HEIGHT = 480;
 #include "params.glsl"
 #include "band_common.glsl"
-layout(set = 0, binding = 1) readonly buffer Features { uvec4 features[]; };
+#define SPAN (BAND + 2)
+layout(set = 0, binding = 1) readonly buffer Costs { uint costs[]; };
 layout(set = 0, binding = 2) readonly buffer Base { int base[]; };
 layout(set = 0, binding = 3) writeonly buffer Paths { uint paths[]; };
+
+int lines() { return DY == 0 ? HEIGHT : (DX == 0 ? WIDTH : WIDTH + HEIGHT - 1); }
+
+// The pixel of `line` at step `i`, or -1 outside the image.
+int pixel_at(int line, int i) {
+  int x, y;
+  if (DY == 0) {
+    y = line;
+    x = DX > 0 ? i : WIDTH - 1 - i;
+  } else {
+    y = DY > 0 ? i : HEIGHT - 1 - i;
+    x = DX > 0 ? line - (HEIGHT - 1) + i : (DX < 0 ? line - i : line);
+  }
+  return x >= 0 && x < WIDTH ? y * WIDTH + x : -1;
+}
+
+// One step of the recurrence: previous becomes this pixel's path costs.
+void advance(inout uint previous[BAND], inout int previous_base, int b, uint words[WORDS]) {
+  // A path entering the image starts from zero, in its own band.
+  int delta = previous_base >= 0 ? b - previous_base : 0;
+  uint minimum = previous[0];
+  for (int k = 1; k < BAND; ++k) minimum = min(minimum, previous[k]);
+
+  // window[j] is the previous candidate j - 1 + delta, normalized.
+  uint window[SPAN];
+  window[0] = uint(P2);
+  for (int k = 0; k < BAND; ++k) window[k + 1] = previous[k] - minimum;
+  window[SPAN - 1] = uint(P2);
+  int shift = clamp(delta, -SPAN, SPAN);
+  int amount = abs(shift);
+  for (int s = 1; s <= SPAN; s *= 2) {
+    if ((amount & s) == 0) continue;
+    uint moved[SPAN];
+    for (int j = 0; j < SPAN; ++j) {
+      // The ends hold P2 outside the band; candidates past them too.
+      uint up = j + s < SPAN ? window[j + s] : uint(P2);
+      uint down = j - s >= 0 ? window[j - s] : uint(P2);
+      moved[j] = shift > 0 ? up : down;
+    }
+    for (int j = 0; j < SPAN; ++j) window[j] = moved[j];
+  }
+
+  for (int k = 0; k < BAND; ++k) {
+    uint cost = (words[k / 4] >> (8 * (k % 4))) & 255u;
+    uint own = min(window[k + 1], uint(P2));
+    uint neighbour = min(window[k], window[k + 2]) + uint(P1);
+    previous[k] = min(own, neighbour) + cost;
+  }
+  previous_base = b;
+}
+
+uint packed(uint previous[BAND], int w) {
+  return previous[4 * w] | (previous[4 * w + 1] << 8) | (previous[4 * w + 2] << 16) |
+         (previous[4 * w + 3] << 24);
+}
 
 void main() {
   load_params();
   int line = int(gl_GlobalInvocationID.x);
-  int lines = DY == 0 ? HEIGHT : (DX == 0 ? WIDTH : WIDTH + HEIGHT - 1);
-  if (line >= lines) return;
-  int steps = DY == 0 ? WIDTH : HEIGHT;
+  if (line >= lines()) return;
 
   uint previous[BAND];
   for (int k = 0; k < BAND; ++k) previous[k] = 0u;
   int previous_base = -1;
-  uint window[BAND + 2];
 
+  int pixel = pixel_at(line, 0);
+  int b = pixel >= 0 ? max(base[pixel], 0) : 0;
+  uint words[WORDS];
+  for (int w = 0; w < WORDS; ++w) words[w] = pixel >= 0 ? costs[pixel * WORDS + w] : 0u;
+
+  int steps = DY == 0 ? WIDTH : HEIGHT;
   for (int i = 0; i < steps; ++i) {
-    int x, y;
-    if (DY == 0) {
-      y = line;
-      x = DX > 0 ? i : WIDTH - 1 - i;
-    } else {
-      y = DY > 0 ? i : HEIGHT - 1 - i;
-      x = DX > 0 ? line - (HEIGHT - 1) + i : (DX < 0 ? line - i : line);
-    }
-    if (x < 0 || x >= WIDTH) continue;
-    int pixel = y * WIDTH + x;
-    int b = max(base[pixel], 0);
-    // A path entering the image starts from zero, in its own band.
-    if (previous_base < 0) previous_base = b;
+    int next_pixel = i + 1 < steps ? pixel_at(line, i + 1) : -1;
+    int next_b = next_pixel >= 0 ? max(base[next_pixel], 0) : 0;
+    uint next_words[WORDS];
+    for (int w = 0; w < WORDS; ++w) next_words[w] = next_pixel >= 0 ? costs[next_pixel * WORDS + w] : 0u;
 
-    uint minimum = previous[0];
-    for (int k = 1; k < BAND; ++k) minimum = min(minimum, previous[k]);
-    int delta = b - previous_base;
-    for (int j = 0; j < BAND + 2; ++j) {
-      int index = j - 1 + delta;
-      window[j] = index >= 0 && index < BAND ? previous[index] - minimum : uint(P2);
+    if (pixel >= 0) {
+      advance(previous, previous_base, b, words);
+      for (int w = 0; w < WORDS; ++w) paths[pixel * WORDS + w] = packed(previous, w);
     }
 
-    uvec4 centre = features[feature_index(x, y)];
-    for (int k = 0; k < BAND; ++k) {
-      int source = x - (b + k);
-      // Right features left of the image are zero, as libSGM pads them.
-      uvec2 right = source >= 0 ? features[feature_index(source, y)].zw : uvec2(0u);
-      uint cost = bitCount(centre.x ^ right.x) + bitCount(centre.y ^ right.y);
-      uint own = min(window[k + 1], uint(P2));
-      uint neighbour = min(window[k], window[k + 2]) + uint(P1);
-      previous[k] = min(own, neighbour) + cost;
-    }
-    previous_base = b;
-
-    for (int w = 0; w < WORDS; ++w) {
-      paths[pixel * WORDS + w] = previous[4 * w] | (previous[4 * w + 1] << 8) |
-                                 (previous[4 * w + 2] << 16) | (previous[4 * w + 3] << 24);
-    }
+    pixel = next_pixel;
+    b = next_b;
+    for (int w = 0; w < WORDS; ++w) words[w] = next_words[w];
   }
 }
