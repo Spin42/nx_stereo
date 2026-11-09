@@ -5,15 +5,18 @@ defmodule NxStereo.Vulkan do
   # features and byte volumes are stored in tiles of 1024 / disparities rows.
 
   @spirv_dir Path.expand("../../priv/spirv", __DIR__)
-  @stages ~w(census cost_forward cost_reverse cost_vertical cost_vertical_8 cost_up
-              cost_down_right cost_down_left cost_up_right cost_up_left consistency median)a
-  # Scans added for 8 paths, each over its own byte volume
+  @stages ~w(census cost_forward cost_reverse cost_down cost_up cost_down_right
+              cost_down_left cost_up_right cost_up_left select select_8 consistency median)a
+  # The 8-path scans after the horizontal ones, in order: a paired scan reads
+  # its partner's volume and writes their sum (each path byte stays below
+  # 128), so the selection reads four volumes, not eight.
   @lines [
-    cost_up: :up,
-    cost_down_right: :down_right,
-    cost_down_left: :down_left,
-    cost_up_right: :up_right,
-    cost_up_left: :up_left
+    {:cost_up, :up, nil},
+    {:cost_down_right, :up_down_right, :up},
+    {:cost_down_left, :down_left, nil},
+    {:cost_up_right, :down_left_up_right, :down_left},
+    {:cost_down, :down, nil},
+    {:cost_up_left, :down_up_left, :down}
   ]
 
   @spirv (for disparities <- [64, 128], stage <- @stages, into: %{} do
@@ -44,20 +47,18 @@ defmodule NxStereo.Vulkan do
     rows = ceil_div(height, tile)
 
     # Vertical scans run one line per column, diagonal ones one per diagonal
-    lines =
-      if config.paths == 8 do
-        for {stage, name} <- @lines do
-          count = if stage == :cost_up, do: width, else: width + height - 1
-          {kernel.(stage, {ceil_div(count, tile), 1, 1}), [:params, :costs], [{name, volume}]}
-        end
-      else
-        []
-      end
+    line = fn stage, name, partner ->
+      count = if stage in [:cost_up, :cost_down], do: width, else: width + height - 1
+      reads = if partner, do: [:params, :costs, partner], else: [:params, :costs]
+      {kernel.(stage, {ceil_div(count, tile), 1, 1}), reads, [{name, volume}]}
+    end
 
-    {vertical, stored} =
+    {lines, select, summed} =
       if config.paths == 8,
-        do: {:cost_vertical_8, [:forward, :reverse | Keyword.values(@lines)]},
-        else: {:cost_vertical, [:forward, :reverse]}
+        do:
+          {for({stage, name, partner} <- @lines, do: line.(stage, name, partner)), :select_8,
+           [:forward_reverse, :up_down_right, :down_left_up_right, :down_up_left]},
+        else: {[line.(:cost_down, :down, nil)], :select, [:forward_reverse, :down]}
 
     %NxIREE.Vulkan.Pipeline{
       inputs: [:left, :right, :params],
@@ -67,11 +68,12 @@ defmodule NxStereo.Vulkan do
            [:left, :right], [features: Nx.template({tiled_pixels * 4}, :u32)]},
           {kernel.(:cost_forward, {rows, 1, 1}), [:params, :features],
            [forward: volume, costs: volume]},
-          {kernel.(:cost_reverse, {rows, 1, 1}), [:params, :costs], [reverse: volume]}
+          {kernel.(:cost_reverse, {rows, 1, 1}), [:params, :costs, :forward],
+           [forward_reverse: volume]}
         ] ++
           lines ++
           [
-            {kernel.(vertical, {ceil_div(width, tile), 1, 1}), [:params, :costs | stored],
+            {kernel.(select, {width, rows, 1}), [:params | summed],
              [disparity: map, winners: Nx.template({pixels}, :u32)]},
             {kernel.(:consistency, {height, 1, 1}), [:disparity, :winners], [consistent: map]},
             {kernel.(:median, {ceil_div(pixels, 128), 1, 1}), [:consistent],

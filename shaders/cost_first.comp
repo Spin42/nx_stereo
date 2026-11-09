@@ -31,8 +31,7 @@ void main() {
   int line = int(gl_WorkGroupID.x) * LINES + int(gl_LocalInvocationID.x) / LANES;
   if (line >= HEIGHT) return;
   uint lane = gl_SubgroupInvocationID % LANES;
-  uint base = gl_SubgroupInvocationID - lane;
-  LaneGeometry g = lane_geometry(lane, base);
+  LaneGeometry g = lane_geometry(lane);
   bool first_lane = lane == 0;
   int pixel = ((line / VOLUME_TILE) * WIDTH) * VOLUME_TILE + line % VOLUME_TILE;
   int word = volume_word(0, line, lane);
@@ -45,7 +44,7 @@ void main() {
   for (int x = 0; x < WIDTH; ++x) {
     FEATURE_PAIR pair = features[pixel];
     uvec2 feature = left_of(pair), incoming = right_of(pair);
-    uvec2 tail = subgroupShuffle(window[BLOCK - 1], g.lower_lane);
+    uvec2 tail = subgroupShuffleUp(window[BLOCK - 1], 1u);
     for (int k = BLOCK - 1; k > 0; --k) window[k] = window[k - 1];
     window[0] = first_lane ? incoming : tail;
     uint costs[BLOCK];

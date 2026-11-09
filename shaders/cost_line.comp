@@ -18,12 +18,25 @@ layout(constant_id = 1) const int HEIGHT = 480;
 #include "params.glsl"
 #include "cost_dp.glsl"
 layout(set = 0, binding = 1) readonly buffer Costs { PATH_WORD_TYPE cost_words[]; };
+#if PAIRED
+// The partner path's volume: the scan writes the sum of both, each byte below
+// 128, so the selection reads half as many volumes.
+layout(set = 0, binding = 2) readonly buffer Partner { PATH_WORD_TYPE partner[]; };
+layout(set = 0, binding = 3) writeonly buffer Paths { PATH_WORD_TYPE paths[]; };
+#else
 layout(set = 0, binding = 2) writeonly buffer Paths { PATH_WORD_TYPE paths[]; };
+#endif
+PATH_WORD_TYPE stored_path(uint previous[BLOCK], int word, int first) {
+#if PAIRED
+  return pack_lane(previous, first) + partner[word];
+#else
+  return pack_lane(previous, first);
+#endif
+}
 void main() {
   load_params();
   uint lane = gl_SubgroupInvocationID % LANES;
-  uint base = gl_SubgroupInvocationID - lane;
-  LaneGeometry g = lane_geometry(lane, base);
+  LaneGeometry g = lane_geometry(lane);
   int line = int(gl_WorkGroupID.x) * LINES + int(gl_LocalInvocationID.x) / LANES;
   if (line >= (STEP_X == 0 ? WIDTH : WIDTH + HEIGHT - 1)) return;
   uint previous[BLOCK];
@@ -38,6 +51,6 @@ void main() {
     uint costs[BLOCK];
     for (int k = 0; k < BLOCK; k += PATH_PACK) unpack_lane(cost_words[word + k / PATH_PACK], costs, k);
     update_path(costs, previous, last_min, g);
-    for (int k = 0; k < BLOCK; k += PATH_PACK) paths[word + k / PATH_PACK] = pack_lane(previous, k);
+    for (int k = 0; k < BLOCK; k += PATH_PACK) paths[word + k / PATH_PACK] = stored_path(previous, word + k / PATH_PACK, k);
   }
 }
