@@ -8,19 +8,26 @@
 // a vertical (DX = 0) or diagonal scan visiting rows downwards (DY = 1) or
 // upwards. Matching costs come from band_cost.comp. The previous pixel's
 // normalized costs move to this pixel's band by disparity through a barrel
-// shifter, so every array index is a constant, P2 standing for a candidate its
-// band lacks. A step's loads are issued one step ahead. A horizontal scan
-// reads band_transpose.comp's column-major costs, each pixel's base as its
-// last word, and writes its paths column-major, so a wave's lines are
-// consecutive in memory as a vertical scan's are; with PAIRED it adds the
-// opposite scan's path bytes to its own. With DX2 and DY2, one dispatch
-// scans two directions and writes both volumes, the second after the first.
+// shifter over their packed bytes, so every array index is a constant, P2
+// standing for a candidate its band lacks. A step's loads are issued one step
+// ahead. A horizontal scan reads band_transpose.comp's column-major costs,
+// each pixel's base as its last word, and writes its paths column-major, so a
+// wave's lines are consecutive in memory as a vertical scan's are; with PAIRED
+// it adds the opposite scan's path bytes to its own. With DX2 and DY2, one
+// dispatch scans two directions and writes both volumes, the second after the
+// first.
 layout(local_size_x = 64) in;
 layout(constant_id = 0) const int WIDTH = 640;
 layout(constant_id = 1) const int HEIGHT = 480;
 #include "params.glsl"
 #include "band_common.glsl"
 #define SPAN (BAND + 2)
+// The window's row of bytes: PAD_WORDS words of P2 before the candidates, so
+// that the window, at byte WINDOW_AT, can move SPAN bytes either way.
+#define PAD_WORDS ((SPAN + 4) / 4)
+#define WINDOW_AT (4 * PAD_WORDS - 1)
+#define WINDOW_WORDS ((SPAN + 3) / 4)
+#define ROW_WORDS ((WINDOW_AT + SPAN) / 4 + WINDOW_WORDS + 1)
 #ifndef PAIRED
 #define PAIRED 0
 #endif
@@ -58,31 +65,38 @@ int pixel_at(int dx, int dy, int line, int i) {
   return dy == 0 ? x * HEIGHT + y : y * WIDTH + x;
 }
 
-// One step of the recurrence: previous becomes this pixel's path costs.
-void advance(inout uint previous[BAND], inout int previous_base, int b, uint words[WORDS]) {
+uint packed(uint previous[BAND], int w) {
+  return previous[4 * w] | (previous[4 * w + 1] << 8) | (previous[4 * w + 2] << 16) |
+         (previous[4 * w + 3] << 24);
+}
+
+// One step of the recurrence: previous, and its packed bytes, become this
+// pixel's path costs.
+void advance(inout uint previous[BAND], inout uint packed_previous[WORDS], inout int previous_base,
+             int b, uint words[WORDS]) {
   // A path entering the image starts from zero, in its own band.
   int delta = previous_base >= 0 ? b - previous_base : 0;
   uint minimum = previous[0];
   for (int k = 1; k < BAND; ++k) minimum = min(minimum, previous[k]);
 
-  // window[j] is the previous candidate j - 1 + delta, normalized.
-  uint window[SPAN];
-  window[0] = uint(P2);
-  for (int k = 0; k < BAND; ++k) window[k + 1] = previous[k] - minimum;
-  window[SPAN - 1] = uint(P2);
-  int shift = clamp(delta, -SPAN, SPAN);
-  int amount = abs(shift);
-  for (int s = 1; s <= SPAN; s *= 2) {
-    if ((amount & s) == 0) continue;
-    uint moved[SPAN];
-    for (int j = 0; j < SPAN; ++j) {
-      // The ends hold P2 outside the band; candidates past them too.
-      uint up = j + s < SPAN ? window[j + s] : uint(P2);
-      uint down = j - s >= 0 ? window[j - s] : uint(P2);
-      moved[j] = shift > 0 ? up : down;
-    }
-    for (int j = 0; j < SPAN; ++j) window[j] = moved[j];
+  // window[j] is the previous candidate j - 1 + delta, normalized: byte
+  // WINDOW_AT + j + delta of a row of P2 bytes that holds the normalized
+  // candidates from byte WINDOW_AT + 1. A barrel shifter gathers the row's
+  // words from that byte's word, a funnel shift aligns the bytes.
+  uint p2 = uint(P2) * 0x01010101u;
+  uint row[ROW_WORDS];
+  for (int w = 0; w < ROW_WORDS; ++w) row[w] = p2;
+  for (int w = 0; w < WORDS; ++w) row[PAD_WORDS + w] = packed_previous[w] - minimum * 0x01010101u;
+  int at = WINDOW_AT + clamp(delta, -SPAN, SPAN);
+  int word = at >> 2, bits = 8 * (at & 3);
+  for (int s = 1; s < ROW_WORDS; s *= 2) {
+    bool take = (word & s) != 0;
+    for (int w = 0; w < ROW_WORDS; ++w) row[w] = take ? (w + s < ROW_WORDS ? row[w + s] : p2) : row[w];
   }
+  uint gathered[WINDOW_WORDS];
+  for (int w = 0; w < WINDOW_WORDS; ++w) gathered[w] = (row[w] >> bits) | ((row[w + 1] << (24 - bits)) << 8);
+  uint window[SPAN];
+  for (int j = 0; j < SPAN; ++j) window[j] = (gathered[j / 4] >> (8 * (j % 4))) & 255u;
 
   for (int k = 0; k < BAND; ++k) {
     uint cost = (words[k / 4] >> (8 * (k % 4))) & 255u;
@@ -90,18 +104,16 @@ void advance(inout uint previous[BAND], inout int previous_base, int b, uint wor
     uint neighbour = min(window[k], window[k + 2]) + uint(P1);
     previous[k] = min(own, neighbour) + cost;
   }
+  for (int w = 0; w < WORDS; ++w) packed_previous[w] = packed(previous, w);
   previous_base = b;
-}
-
-uint packed(uint previous[BAND], int w) {
-  return previous[4 * w] | (previous[4 * w + 1] << 8) | (previous[4 * w + 2] << 16) |
-         (previous[4 * w + 3] << 24);
 }
 
 // Scans `line` in the direction (dx, dy), writing its paths at `offset` in Paths.
 void scan(int dx, int dy, int line, int offset) {
   uint previous[BAND];
   for (int k = 0; k < BAND; ++k) previous[k] = 0u;
+  uint packed_previous[WORDS];
+  for (int w = 0; w < WORDS; ++w) packed_previous[w] = 0u;
   int previous_base = -1;
 
   int pixel = pixel_at(dx, dy, line, 0);
@@ -117,11 +129,11 @@ void scan(int dx, int dy, int line, int offset) {
     for (int w = 0; w < WORDS; ++w) next_words[w] = next_pixel >= 0 ? costs[next_pixel * PIXEL_WORDS + w] : 0u;
 
     if (pixel >= 0) {
-      advance(previous, previous_base, b, words);
+      advance(previous, packed_previous, previous_base, b, words);
 #if PAIRED
-      for (int w = 0; w < WORDS; ++w) paths[offset + pixel * WORDS + w] = packed(previous, w) + partner[pixel * WORDS + w];
+      for (int w = 0; w < WORDS; ++w) paths[offset + pixel * WORDS + w] = packed_previous[w] + partner[pixel * WORDS + w];
 #else
-      for (int w = 0; w < WORDS; ++w) paths[offset + pixel * WORDS + w] = packed(previous, w);
+      for (int w = 0; w < WORDS; ++w) paths[offset + pixel * WORDS + w] = packed_previous[w];
 #endif
     }
 
