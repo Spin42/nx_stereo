@@ -13,13 +13,13 @@
 // three-path selection runs in the scan: each pixel's path is added to the
 // forward and reverse sum and selected as cost_select.glsl, and no path is
 // stored.
-layout(local_size_x = 128) in;
 // Image size is a specialization constant; the disparity
 // range and lane layout stay compile-time macros.
 layout(constant_id = 0) const int WIDTH = 640;
 layout(constant_id = 1) const int HEIGHT = 480;
 #include "params.glsl"
 #include "cost_dp.glsl"
+layout(local_size_x = LANES * LINES) in;
 layout(set = 0, binding = 1) readonly buffer Costs { PATH_WORD_TYPE cost_words[]; };
 #if SELECT
 layout(set = 0, binding = 2) readonly buffer ForwardReverse { PATH_WORD_TYPE forward_reverse[]; };

@@ -2,7 +2,7 @@ defmodule NxStereo.Vulkan do
   @moduledoc false
   # The libSGM-derived compute shaders as an NxIREE.Vulkan.Pipeline. Stage
   # bindings, buffer sizes and workgroup counts follow the shaders' layouts:
-  # features and byte volumes are stored in tiles of 1024 / disparities rows.
+  # features and byte volumes are stored in tiles of 8 rows.
 
   @spirv_dir Path.expand("../../priv/spirv", __DIR__)
   @stages ~w(census cost_forward cost_reverse cost_down cost_up cost_down_select
@@ -186,7 +186,7 @@ defmodule NxStereo.Vulkan do
   end
 
   defp build(%{height: height, width: width, disparities: disparities} = config) do
-    tile = div(1024, disparities)
+    tile = 8
     tiled_pixels = width * ceil_div(height, tile) * tile
     pixels = width * height
 

@@ -6,13 +6,14 @@
 // through relative shuffles; a missing neighbour contributes P2 - P1 so that
 // adding P1 reproduces the P2 clamp exactly.
 #define LANES (DISPARITIES / BLOCK)
-#define LINES (128 / LANES)
+// A workgroup scans LINES lines, LANES * LINES threads: 64 at 64 disparities,
+// which Adreno GPUs run as narrower waves than 128.
+#define LINES 8
 #define PATH_WORD_TYPE uvec2
 #define PATH_PACK 8
 #define WORDS_PER_PIXEL (DISPARITIES / PATH_PACK)
 // Byte volumes are stored in tiles of LINES consecutive rows per column, so a
-// horizontal scan's workgroup touches one contiguous span per pixel step and
-// each warp reads or writes 256 contiguous bytes.
+// horizontal scan's workgroup touches one contiguous span per pixel step.
 #define VOLUME_TILE LINES
 #define TILE_WORDS (VOLUME_TILE * WORDS_PER_PIXEL)
 #define TILE_ROW_WORDS (WIDTH * TILE_WORDS)

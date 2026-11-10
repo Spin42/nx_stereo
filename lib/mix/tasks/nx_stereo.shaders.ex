@@ -57,7 +57,7 @@ defmodule Mix.Tasks.NxStereo.Shaders do
           [
             "-DDISPARITIES=#{disparities}",
             "-DBLOCK=8",
-            "-DFEATURE_TILE=#{div(1024, disparities)}"
+            "-DFEATURE_TILE=8"
           ] ++ flags ++ ["-o", output, "shaders/#{source}.comp"]
 
       compile!(compiler, args, source, output)
