@@ -1,0 +1,108 @@
+#version 450
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_GOOGLE_include_directive : require
+// Copyright 2016 Fixstars Corporation
+// SPDX-License-Identifier: Apache-2.0
+// NxStereo.sgm_band/4's selection, WORDS lanes per pixel, each summing one
+// word of the 3 or 8 (PATHS) paths, so a wave's loads are consecutive words:
+// the winner, the uniqueness check and the parabolic subpixel refinement,
+// with the same winner keys as cost_select.glsl for the consistency check.
+layout(local_size_x = 64) in;
+layout(constant_id = 0) const int WIDTH = 640;
+layout(constant_id = 1) const int HEIGHT = 480;
+layout(constant_id = 2) const int DISPARITIES = 128;
+#include "params.glsl"
+#include "band_common.glsl"
+layout(set = 0, binding = 1) readonly buffer Base { int base[]; };
+// The horizontal paths arrive summed in one column-major volume, as the
+// horizontal scans write it; with 8 paths the others
+// arrive two to a buffer, the second volume after the first.
+#define VOLUMES (PATHS - 1)
+#define VOLUME (WIDTH * HEIGHT * WORDS)
+layout(set = 0, binding = 2) readonly buffer Path0 { uint path0[]; };
+layout(set = 0, binding = 3) readonly buffer Path1 { uint path1[]; };
+#if PATHS == 8
+layout(set = 0, binding = 4) readonly buffer Path2 { uint path2[]; };
+layout(set = 0, binding = 5) readonly buffer Path3 { uint path3[]; };
+#define OUTPUT_BINDING 6
+#else
+#define OUTPUT_BINDING 4
+#endif
+layout(set = 0, binding = OUTPUT_BINDING) writeonly buffer LeftDisparity { float left_disparity[]; };
+layout(set = 0, binding = OUTPUT_BINDING + 1) writeonly buffer Winners { uint winners[]; };
+
+// Word `i` of the pixel's band summed across the paths, the horizontal sum's
+// at `column_word` of its column-major volume.
+uvec4 summed(int i, int column_word) {
+  uint words[VOLUMES];
+  words[0] = path0[column_word];
+  words[1] = path1[i];
+#if PATHS == 8
+  words[2] = path1[VOLUME + i];
+  words[3] = path2[i];
+  words[4] = path2[VOLUME + i];
+  words[5] = path3[i];
+  words[6] = path3[VOLUME + i];
+#endif
+  uvec4 sum = uvec4(0u);
+  for (int p = 0; p < VOLUMES; ++p)
+    sum += uvec4(words[p] & 255u, (words[p] >> 8) & 255u, (words[p] >> 16) & 255u, words[p] >> 24);
+  return sum;
+}
+
+// A pixel's lanes are consecutive and WORDS-aligned within a subgroup.
+uint pixel_min(uint value) {
+  for (uint span = WORDS / 2; span > 0; span /= 2) value = min(value, subgroupShuffleXor(value, span));
+  return value;
+}
+
+// This lane's candidate `k` of the band, or none.
+uint candidate(uint values[4], int lane, int k) {
+  int c = k - 4 * lane;
+  return c == 0 ? values[0] : c == 1 ? values[1] : c == 2 ? values[2] : c == 3 ? values[3] : 0xffffffffu;
+}
+
+void main() {
+  load_params();
+  int pixel = int(gl_GlobalInvocationID.x) / WORDS;
+  int lane = int(gl_GlobalInvocationID.x) % WORDS;
+  // No early return: every lane of a pixel takes part in the shuffles.
+  bool inside = pixel < WIDTH * HEIGHT;
+  int index = inside ? pixel : 0;
+  int x = index % WIDTH;
+  // A negative base marks a pixel without an estimate: no match.
+  bool estimated = base[index] >= 0;
+  int b = max(base[index], 0);
+
+  uvec4 s = summed(index * WORDS + lane, ((index % WIDTH) * HEIGHT + index / WIDTH) * WORDS + lane);
+  uint values[4] = uint[4](s.x, s.y, s.z, s.w);
+  // Candidates right of the image (d > x) never win.
+  for (int c = 0; c < 4; ++c) values[c] += b + 4 * lane + c > x ? 0x8000u : 0u;
+
+  // The lowest sum, the lowest candidate among equals.
+  uint key = 0xffffffffu;
+  for (int c = 0; c < 4; ++c) key = min(key, (values[c] << 8) | uint(4 * lane + c));
+  key = pixel_min(key);
+  uint minimum = key >> 8;
+  int winner = int(key & 255u);
+
+  uint second = 0xffffffffu;
+  for (int c = 0; c < 4; ++c) second = abs(4 * lane + c - winner) <= 1 ? second : min(second, values[c]);
+  second = pixel_min(second);
+  float lo = float(pixel_min(candidate(values, lane, max(winner - 1, 0))));
+  float hi = float(pixel_min(candidate(values, lane, min(winner + 1, BAND - 1))));
+
+  float m = float(minimum);
+  int d = b + winner;
+  bool accepted = estimated && float(second) > m * UNIQUENESS;
+  float denominator = lo + hi - 2.0 * m;
+  float correction = clamp((lo - hi) / (2.0 * max(denominator, 1.0)), -0.5, 0.5);
+  bool refine = denominator > 0.0 && winner > 0 && winner < BAND - 1 && d < min(DISPARITIES - 1, x);
+  float disparity = float(d) + (refine ? correction : 0.0);
+
+  if (inside && lane == 0) {
+    left_disparity[pixel] = accepted ? disparity : -1.0;
+    winners[pixel] = accepted ? (minimum << 16) | uint(d) : 0xffffffffu;
+  }
+}

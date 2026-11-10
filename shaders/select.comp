@@ -1,0 +1,63 @@
+#version 450
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_KHR_shader_subgroup_shuffle_relative : require
+#extension GL_GOOGLE_include_directive : require
+// Copyright 2016 Fixstars Corporation
+// SPDX-License-Identifier: Apache-2.0
+// Selection over the stored paths, every pixel in parallel: a workgroup takes
+// the LINES pixels of one tile column, so its loads are contiguous, and each
+// lane group sums the 8 paths and selects as cost_select.glsl. The paths come
+// summed in pairs: Adreno GPUs slow down sharply when a kernel reads more than
+// a few volumes at once. The 3-path selection runs in cost_line.comp's
+// vertical scan.
+// Image size is a specialization constant; the disparity
+// range and lane layout stay compile-time macros.
+layout(constant_id = 0) const int WIDTH = 640;
+layout(constant_id = 1) const int HEIGHT = 480;
+#include "params.glsl"
+#include "cost_dp.glsl"
+layout(local_size_x = LANES * LINES) in;
+// The paths summed in pairs by the paired scans, read as 32-bit words.
+#define VOLUMES 4
+layout(set = 0, binding = 1) readonly buffer ForwardReverse { uint forward_reverse[]; };
+layout(set = 0, binding = 2) readonly buffer UpDownRight { uint up_down_right[]; };
+layout(set = 0, binding = 3) readonly buffer DownLeftUpRight { uint down_left_up_right[]; };
+layout(set = 0, binding = 4) readonly buffer DownUpLeft { uint down_up_left[]; };
+layout(set = 0, binding = 5) writeonly buffer LeftDisparity { float left_disparity[]; };
+layout(set = 0, binding = 6) writeonly buffer Winners { uint winners[]; };
+#include "cost_select.glsl"
+// A workgroup's pixels are one tile of each volume; each lane reads its own
+// words of it.
+#define UINTS_PER_WORD (PATH_PACK / 4)
+uint volume_uint(int volume, int at) {
+  if (volume == 0) return forward_reverse[at];
+  if (volume == 1) return up_down_right[at];
+  if (volume == 2) return down_left_up_right[at];
+  return down_up_left[at];
+}
+void main() {
+  load_params();
+  uint lane = gl_SubgroupInvocationID % LANES;
+  uint base = gl_SubgroupInvocationID - lane;
+  int x = int(gl_WorkGroupID.x);
+  int row = int(gl_LocalInvocationID.x) / LANES;
+  int y = int(gl_WorkGroupID.y) * LINES + row;
+  // Whole lane groups share a pixel, so the selection's shuffles read active lanes.
+  if (y >= HEIGHT) return;
+  int first = volume_word(x, int(gl_WorkGroupID.y) * LINES, 0);
+  int index = row * WORDS_PER_PIXEL + int(lane) * WORDS_PER_LANE;
+  uint stored[BLOCK], pair[BLOCK], none[BLOCK];
+  for (int k = 0; k < BLOCK; ++k) {
+    stored[k] = 0u;
+    none[k] = 0u;
+  }
+  for (int v = 0; v < VOLUMES; ++v) {
+    for (int k = 0; k < BLOCK; k += PATH_PACK) {
+      int at = (first + index + k / PATH_PACK) * UINTS_PER_WORD;
+      unpack_lane(PATH_WORD_TYPE(volume_uint(v, at), volume_uint(v, at + 1)), pair, k);
+      for (int i = 0; i < PATH_PACK; ++i) stored[k + i] += pair[k + i];
+    }
+  }
+  select_sum(none, y * WIDTH + x, stored, select_geometry(x, lane, base));
+}

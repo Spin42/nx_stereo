@@ -3,16 +3,17 @@
 // libSGM's normalized directional recurrence over BLOCK disparities per lane,
 // written so every candidate is formed once: the clamped own value, and the
 // cheaper of the two neighbours plus P1. Lane-boundary neighbours arrive
-// through loop-invariant shuffle indices; a missing neighbour contributes
-// P2 - P1 so that adding P1 reproduces the P2 clamp exactly.
+// through relative shuffles; a missing neighbour contributes P2 - P1 so that
+// adding P1 reproduces the P2 clamp exactly.
 #define LANES (DISPARITIES / BLOCK)
-#define LINES (128 / LANES)
+// A workgroup scans LINES lines, LANES * LINES threads: 64 at 64 disparities,
+// which Adreno GPUs run as narrower waves than 128.
+#define LINES 8
 #define PATH_WORD_TYPE uvec2
 #define PATH_PACK 8
 #define WORDS_PER_PIXEL (DISPARITIES / PATH_PACK)
 // Byte volumes are stored in tiles of LINES consecutive rows per column, so a
-// horizontal scan's workgroup touches one contiguous span per pixel step and
-// each warp reads or writes 256 contiguous bytes.
+// horizontal scan's workgroup touches one contiguous span per pixel step.
 #define VOLUME_TILE LINES
 #define TILE_WORDS (VOLUME_TILE * WORDS_PER_PIXEL)
 #define TILE_ROW_WORDS (WIDTH * TILE_WORDS)
@@ -21,15 +22,11 @@ int volume_word(int x, int y, uint lane) {
   return ((y / VOLUME_TILE) * WIDTH + x) * TILE_WORDS + (y % VOLUME_TILE) * WORDS_PER_PIXEL + int(lane) * WORDS_PER_LANE;
 }
 struct LaneGeometry {
-  uint lower_lane;
-  uint upper_lane;
   bool has_lower;
   bool has_upper;
 };
-LaneGeometry lane_geometry(uint lane, uint base) {
+LaneGeometry lane_geometry(uint lane) {
   LaneGeometry g;
-  g.lower_lane = base + (lane + LANES - 1) % LANES;
-  g.upper_lane = base + (lane + 1) % LANES;
   g.has_lower = lane > 0;
   g.has_upper = lane + 1 < LANES;
   return g;
@@ -38,11 +35,18 @@ uint group_min(uint value) {
   for (uint span = LANES / 2; span > 0; span /= 2) value = min(value, subgroupShuffleXor(value, span));
   return value;
 }
+uint group_or(uint value) {
+  for (uint span = LANES / 2; span > 0; span /= 2) value |= subgroupShuffleXor(value, span);
+  return value;
+}
 void update_path(uint costs[BLOCK], inout uint previous[BLOCK], inout uint last_min, LaneGeometry g) {
   uint a[BLOCK];
   for (int k = 0; k < BLOCK; ++k) a[k] = previous[k] - last_min;
-  uint lower = subgroupShuffle(a[BLOCK - 1], g.lower_lane);
-  uint upper = subgroupShuffle(a[0], g.upper_lane);
+  // Relative shuffles: cheaper than indexed ones on Adreno GPUs. Across a
+  // lane group's edges they read another group, which has_lower and
+  // has_upper replace below.
+  uint lower = subgroupShuffleUp(a[BLOCK - 1], 1u);
+  uint upper = subgroupShuffleDown(a[0], 1u);
   lower = g.has_lower ? lower : uint(P2 - P1);
   upper = g.has_upper ? upper : uint(P2 - P1);
   uint minimum = 255;

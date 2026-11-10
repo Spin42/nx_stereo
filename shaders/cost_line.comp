@@ -9,21 +9,44 @@
 // visited downwards (STEP_Y = 1) or upwards (STEP_Y = -1) and the path moves
 // STEP_X columns per row, so line l covers column l (STEP_X = 0),
 // l - (HEIGHT - 1) + i (STEP_X = 1) or l - i (STEP_X = -1) at step i. A
-// diagonal line keeps a zero path until it enters the image.
-layout(local_size_x = 128) in;
+// diagonal line keeps a zero path until it enters the image. With SELECT, the
+// three-path selection runs in the scan: each pixel's path is added to the
+// forward and reverse sum and selected as cost_select.glsl, and no path is
+// stored.
 // Image size is a specialization constant; the disparity
 // range and lane layout stay compile-time macros.
 layout(constant_id = 0) const int WIDTH = 640;
 layout(constant_id = 1) const int HEIGHT = 480;
 #include "params.glsl"
 #include "cost_dp.glsl"
+layout(local_size_x = LANES * LINES) in;
 layout(set = 0, binding = 1) readonly buffer Costs { PATH_WORD_TYPE cost_words[]; };
+#if SELECT
+layout(set = 0, binding = 2) readonly buffer ForwardReverse { PATH_WORD_TYPE forward_reverse[]; };
+layout(set = 0, binding = 3) writeonly buffer LeftDisparity { float left_disparity[]; };
+layout(set = 0, binding = 4) writeonly buffer Winners { uint winners[]; };
+#include "cost_select.glsl"
+#else
+#if PAIRED
+// The partner path's volume: the scan writes the sum of both, each byte below
+// 128, so the selection reads half as many volumes.
+layout(set = 0, binding = 2) readonly buffer Partner { PATH_WORD_TYPE partner[]; };
+layout(set = 0, binding = 3) writeonly buffer Paths { PATH_WORD_TYPE paths[]; };
+#else
 layout(set = 0, binding = 2) writeonly buffer Paths { PATH_WORD_TYPE paths[]; };
+#endif
+#endif
+PATH_WORD_TYPE stored_path(uint previous[BLOCK], int word, int first) {
+#if PAIRED
+  return pack_lane(previous, first) + partner[word];
+#else
+  return pack_lane(previous, first);
+#endif
+}
 void main() {
   load_params();
   uint lane = gl_SubgroupInvocationID % LANES;
-  uint base = gl_SubgroupInvocationID - lane;
-  LaneGeometry g = lane_geometry(lane, base);
+  LaneGeometry g = lane_geometry(lane);
   int line = int(gl_WorkGroupID.x) * LINES + int(gl_LocalInvocationID.x) / LANES;
   if (line >= (STEP_X == 0 ? WIDTH : WIDTH + HEIGHT - 1)) return;
   uint previous[BLOCK];
@@ -38,6 +61,12 @@ void main() {
     uint costs[BLOCK];
     for (int k = 0; k < BLOCK; k += PATH_PACK) unpack_lane(cost_words[word + k / PATH_PACK], costs, k);
     update_path(costs, previous, last_min, g);
-    for (int k = 0; k < BLOCK; k += PATH_PACK) paths[word + k / PATH_PACK] = pack_lane(previous, k);
+#if SELECT
+    uint stored[BLOCK];
+    for (int k = 0; k < BLOCK; k += PATH_PACK) unpack_lane(forward_reverse[word + k / PATH_PACK], stored, k);
+    select_sum(previous, y * WIDTH + x, stored, select_geometry(x, lane, gl_SubgroupInvocationID - lane));
+#else
+    for (int k = 0; k < BLOCK; k += PATH_PACK) paths[word + k / PATH_PACK] = stored_path(previous, word + k / PATH_PACK, k);
+#endif
   }
 }

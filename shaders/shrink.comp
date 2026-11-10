@@ -1,0 +1,20 @@
+#version 450
+// NxStereo.sgm_coarse_to_fine/3's half-size pair: each output pixel is the
+// rounded mean of a 2x2 block of an s32 image, for both images at once.
+layout(local_size_x = 64) in;
+// The half-size image's width and height.
+layout(constant_id = 0) const int WIDTH = 320;
+layout(constant_id = 1) const int HEIGHT = 240;
+layout(set = 0, binding = 0) readonly buffer Left { int left_image[]; };
+layout(set = 0, binding = 1) readonly buffer Right { int right_image[]; };
+layout(set = 0, binding = 2) writeonly buffer LeftHalf { int left_half[]; };
+layout(set = 0, binding = 3) writeonly buffer RightHalf { int right_half[]; };
+
+void main() {
+  int i = int(gl_GlobalInvocationID.x);
+  if (i >= WIDTH * HEIGHT) return;
+  int row = 2 * WIDTH;
+  int at = 2 * (i / WIDTH) * row + 2 * (i % WIDTH);
+  left_half[i] = (left_image[at] + left_image[at + 1] + left_image[at + row] + left_image[at + row + 1] + 2) / 4;
+  right_half[i] = (right_image[at] + right_image[at + 1] + right_image[at + row] + right_image[at + row + 1] + 2) / 4;
+}

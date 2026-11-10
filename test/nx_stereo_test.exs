@@ -104,10 +104,130 @@ defmodule NxStereoTest do
     assert Enum.uniq(results) |> length() == 2
   end
 
+  test "matches 32-bit images as their 8-bit pixels" do
+    {left, right} = pair(16, 80, 3)
+    fun = &NxStereo.sgm(&1, &2, p1: 10, p2: 60)
+
+    wide = Nx.Defn.jit(fun).(Nx.as_type(left, :s32), Nx.as_type(right, :s32))
+    assert Nx.to_flat_list(wide) == Nx.to_flat_list(Nx.Defn.jit(fun).(left, right))
+  end
+
+  describe "sgm_coarse_to_fine/3" do
+    test "matches a shifted texture as sgm/3 does at full resolution" do
+      {left, right} = pair(32, 240, 37)
+      disparity = Nx.Defn.jit(&NxStereo.sgm_coarse_to_fine(&1, &2, [])).(left, right)
+      full = Nx.Defn.jit(&NxStereo.sgm(&1, &2, disparities: 128)).(left, right)
+
+      assert disparity.shape == {32, 240}
+      assert interior(disparity, 140) == interior(full, 140)
+      assert Enum.count(interior(disparity, 140), &(abs(&1 - 37.0) < 0.1)) >= 2300
+    end
+
+    test "agrees with sgm/3 at full resolution across depth edges" do
+      {left, right} = layered(48, 240, 20.5, 60.25)
+      opts = [disparities: 128, p1: 7, p2: 70, uniqueness: 1.05]
+      full = Nx.Defn.jit(&NxStereo.sgm(&1, &2, opts)).(left, right) |> Nx.to_flat_list()
+
+      fine =
+        Nx.Defn.jit(&NxStereo.sgm_coarse_to_fine(&1, &2, opts)).(left, right) |> Nx.to_flat_list()
+
+      both = Enum.zip(fine, full) |> Enum.filter(fn {a, b} -> a >= 0 and b >= 0 end)
+      assert length(both) >= 0.9 * Enum.count(full, &(&1 >= 0))
+      assert Enum.count(both, fn {a, b} -> abs(a - b) <= 1 end) >= 0.95 * length(both)
+    end
+
+    test "validates its inputs" do
+      {left, right} = pair(16, 80, 3)
+
+      assert_raise ArgumentError, ~r/even height and width/, fn ->
+        NxStereo.sgm_coarse_to_fine(left[0..14], right[0..14])
+      end
+
+      assert_raise ArgumentError, ~r/:disparities must be 128/, fn ->
+        NxStereo.sgm_coarse_to_fine(left, right, disparities: 64)
+      end
+    end
+  end
+
+  describe "sgm_band/4" do
+    for paths <- [3, 8] do
+      test "a band covering every disparity matches as sgm/3 with #{paths} paths" do
+        {left, right} = layered(24, 160, 4.5, 14.25)
+        opts = [disparities: 64, p1: 7, p2: 70, uniqueness: 1.05, paths: unquote(paths)]
+        base = Nx.broadcast(Nx.s32(0), {24, 160})
+
+        band =
+          Nx.Defn.jit(&NxStereo.sgm_band(&1, &2, &3, Keyword.put(opts, :band, 64))).(
+            left,
+            right,
+            base
+          )
+
+        full = Nx.Defn.jit(&NxStereo.sgm(&1, &2, opts)).(left, right)
+        assert Nx.to_flat_list(band) == Nx.to_flat_list(full)
+      end
+    end
+
+    test "a band around each pixel's disparity finds the full range's matches" do
+      {left, right} = layered(24, 160, 4.5, 14.25)
+      opts = [disparities: 64, p1: 7, p2: 70, uniqueness: 1.05]
+      full = Nx.Defn.jit(&NxStereo.sgm(&1, &2, opts)).(left, right)
+      # Bands of 16 from 4 below each pixel's disparity: they differ across the depth edges.
+      base =
+        full |> Nx.max(0) |> Nx.floor() |> Nx.as_type(:s32) |> Nx.subtract(4) |> Nx.clip(0, 48)
+
+      band =
+        Nx.Defn.jit(&NxStereo.sgm_band(&1, &2, &3, Keyword.put(opts, :band, 16))).(
+          left,
+          right,
+          base
+        )
+
+      pairs = Enum.zip(Nx.to_flat_list(band), Nx.to_flat_list(full))
+      both = Enum.filter(pairs, fn {a, b} -> a >= 0 and b >= 0 end)
+      agree = Enum.count(both, fn {a, b} -> abs(a - b) <= 0.5 end)
+
+      assert length(both) >= 0.9 * Enum.count(pairs, fn {_a, b} -> b >= 0 end)
+      assert agree >= 0.99 * length(both)
+    end
+
+    test "gives no match where the base is negative" do
+      {left, right} = pair(16, 80, 3)
+
+      base =
+        Nx.broadcast(Nx.s32(0), {16, 80})
+        |> Nx.put_slice([0, 40], Nx.broadcast(Nx.s32(-1), {16, 20}))
+
+      opts = [band: 16, p1: 10, p2: 60]
+
+      band = Nx.Defn.jit(&NxStereo.sgm_band(&1, &2, &3, opts)).(left, right, base)
+
+      assert band[[.., 40..59]] |> Nx.to_flat_list() |> Enum.uniq() == [-1.0]
+      assert band[[4..11, 10..30]] |> Nx.greater(0) |> Nx.all() |> Nx.to_number() == 1
+    end
+
+    test "validates the band" do
+      {left, right} = pair(16, 80, 3)
+      base = Nx.broadcast(Nx.s32(0), {16, 80})
+
+      assert_raise ArgumentError, ~r/:band must be 8, 16, 32 or 64/, fn ->
+        NxStereo.sgm_band(left, right, base, band: 12)
+      end
+
+      assert_raise ArgumentError, ~r/:band must be 8, 16, 32 or 64/, fn ->
+        NxStereo.sgm_band(left, right, base, band: 128, disparities: 128)
+      end
+
+      assert_raise ArgumentError, ~r/base.*s32.*\{16, 80\}/, fn ->
+        NxStereo.sgm_band(left, right, Nx.broadcast(Nx.s32(0), {16, 79}), band: 16)
+      end
+    end
+  end
+
   test "validates its inputs" do
     {left, right} = pair(16, 80, 0)
 
-    assert_raise ArgumentError, ~r/expects u8 images/, fn ->
+    assert_raise ArgumentError, ~r/expects u8 or s32 images/, fn ->
       NxStereo.sgm(Nx.as_type(left, :f32), right)
     end
 
@@ -180,6 +300,97 @@ defmodule NxStereoTest do
           # GLSL's f32 division need not be correctly rounded, so subpixel
           # values may differ in the last bit (here, at most two ulps); every
           # decision must agree.
+          mismatches =
+            Enum.zip(gpu, reference)
+            |> Enum.with_index()
+            |> Enum.reject(fn {{a, b}, _} ->
+              a == -1.0 == (b == -1.0) and trunc(a) == trunc(b) and
+                abs(a - b) <= 2.4e-7 * max(abs(b), 1.0)
+            end)
+
+          assert mismatches == [],
+                 "pixels differ on #{device.uri}: #{inspect(Enum.take(mismatches, 20))}"
+        end
+      end
+    end
+
+    # Every band width on a wide image, whose diagonal scans fold two diagonals
+    # into a line, and one on a tall image, whose scans do not.
+    for {height, width, band} <- [
+          {37, 203, 8},
+          {37, 203, 16},
+          {37, 203, 32},
+          {37, 203, 64},
+          {90, 70, 16}
+        ],
+        paths <- [3, 8] do
+      test "the band shaders match the reference at #{height}x#{width} with a band of #{band}, #{paths} paths",
+           %{devices: devices} do
+        {height, width} = {unquote(height), unquote(width)}
+        {left, right} = layered(height, width, 4.5, 14.25)
+        opts = [disparities: 64, p1: 7, p2: 70, uniqueness: 1.05, paths: unquote(paths)]
+        full = Nx.Defn.jit(&NxStereo.sgm(&1, &2, opts), compiler: EXLA).(left, right)
+
+        base =
+          if unquote(band) == 64,
+            do: Nx.broadcast(Nx.s32(0), {height, width}),
+            else:
+              full
+              |> Nx.max(0)
+              |> Nx.floor()
+              |> Nx.as_type(:s32)
+              |> Nx.subtract(4)
+              |> Nx.clip(0, 64 - unquote(band))
+              # Pixels without an estimate
+              |> Nx.put_slice([10, div(width, 2)], Nx.broadcast(Nx.s32(-1), {8, div(width, 7)}))
+
+        band_opts = Keyword.put(opts, :band, unquote(band))
+        sgm_band = &NxStereo.sgm_band(&1, &2, &3, band_opts)
+
+        reference =
+          Nx.Defn.jit(sgm_band, compiler: EXLA).(left, right, base) |> Nx.to_flat_list()
+
+        for device <- devices do
+          gpu =
+            Nx.Defn.jit(sgm_band,
+              compiler: NxIREE.Compiler,
+              iree_runtime_options: [device: device]
+            ).(left, right, base)
+            |> Nx.backend_transfer(Nx.BinaryBackend)
+            |> Nx.to_flat_list()
+
+          mismatches =
+            Enum.zip(gpu, reference)
+            |> Enum.with_index()
+            |> Enum.reject(fn {{a, b}, _} ->
+              a == -1.0 == (b == -1.0) and trunc(a) == trunc(b) and
+                abs(a - b) <= 2.4e-7 * max(abs(b), 1.0)
+            end)
+
+          assert mismatches == [],
+                 "pixels differ on #{device.uri}: #{inspect(Enum.take(mismatches, 20))}"
+        end
+      end
+    end
+
+    for type <- [:u8, :s32] do
+      test "coarse to fine on the shaders matches the reference, #{type} images", %{
+        devices: devices
+      } do
+        {left, right} = layered(48, 240, 20.5, 60.25)
+        {left, right} = {Nx.as_type(left, unquote(type)), Nx.as_type(right, unquote(type))}
+        fun = &NxStereo.sgm_coarse_to_fine(&1, &2, p1: 7, p2: 70, uniqueness: 1.05)
+        reference = Nx.Defn.jit(fun, compiler: EXLA).(left, right) |> Nx.to_flat_list()
+
+        for device <- devices do
+          gpu =
+            Nx.Defn.jit(fun, compiler: NxIREE.Compiler, iree_runtime_options: [device: device]).(
+              left,
+              right
+            )
+            |> Nx.backend_transfer(Nx.BinaryBackend)
+            |> Nx.to_flat_list()
+
           mismatches =
             Enum.zip(gpu, reference)
             |> Enum.with_index()

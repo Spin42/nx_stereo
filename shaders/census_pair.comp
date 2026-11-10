@@ -13,16 +13,15 @@ layout(set = 0, binding = 1) readonly buffer Right { int right_image[]; };
 // Left and right features of a pixel share one element, stored in tiles of
 // FEATURE_TILE consecutive rows per column, matching the byte volumes.
 layout(set = 0, binding = 2) writeonly buffer Features { FEATURE_PAIR features[]; };
-// Thread t covers column t / FEATURE_TILE of the workgroup and row
-// t % FEATURE_TILE of each of ROWS_PER_THREAD consecutive tiles, so a warp's
-// stores are contiguous and the shared window is filled once per tile group.
-#define ROWS_PER_THREAD 4
+// A workgroup covers COLUMNS columns of GROUP_ROWS rows; a thread computes
+// QUAD consecutive pixels of a row, so each row of their shared window is
+// read once, as consecutive words, for all of them.
+#define QUAD 4
 #define COLUMNS (128 / FEATURE_TILE)
-#define GROUP_ROWS (FEATURE_TILE * ROWS_PER_THREAD)
+#define GROUP_ROWS (128 * QUAD / COLUMNS)
 #define WINDOW_COLUMNS (COLUMNS + 8)
 #define WINDOW_ROWS (GROUP_ROWS + 6)
-// An odd row stride keeps the sixteen rows of a warp in distinct banks.
-#define STRIDE (WINDOW_COLUMNS + 1)
+#define STRIDE WINDOW_COLUMNS
 // One shared word holds both images of a pixel in 16-bit lanes, each offset by
 // 0x100. Subtracting the unoffset centre word, lowered by one level and
 // clamped at zero in each lane, then yields, without borrows between lanes,
@@ -31,12 +30,20 @@ layout(set = 0, binding = 2) writeonly buffer Features { FEATURE_PAIR features[]
 // Census bits and are inverted once at the end.
 #define LANE_OFFSET 0x01000100u
 #define COMPARE_MASK 0x01000100u
-// Neighbour n in visiting order lands at bit 47 - n of the feature. Each chunk of 16 neighbours keeps left bits in
-// its low half and right bits in its high half, so one shift places both.
 shared uint rows[WINDOW_ROWS * STRIDE];
 uint load_pair(int x, int y) {
   int pixel = clamp(y, 0, HEIGHT - 1) * WIDTH + clamp(x, 0, WIDTH - 1);
   return (uint(left_image[pixel]) | (uint(right_image[pixel]) << 16)) + LANE_OFFSET;
+}
+// The census bits of window row `dy` for pixel `p` of the quad, from the 12
+// words the quad's window row holds: neighbour n of 8 lands at bit 7 - n.
+uint row_bits(uint words[QUAD + 8], int p, uint a) {
+  uint bits = 0u;
+  for (int n = 0; n < 8; ++n) {
+    int dx = n < 4 ? n - 4 : n - 3;
+    bits |= ((words[p + 4 + dx] - a) & COMPARE_MASK) << (7 - n);
+  }
+  return bits;
 }
 void main() {
   int tid = int(gl_LocalInvocationID.x);
@@ -47,68 +54,36 @@ void main() {
     rows[r * STRIDE + c] = load_pair(x0 - 4 + c, y0 - 3 + r);
   }
   barrier();
-  int column = tid / FEATURE_TILE, row0 = tid % FEATURE_TILE;
-  int x = x0 + column;
-  if (x >= WIDTH) return;
-  for (int j = 0; j < ROWS_PER_THREAD; ++j) {
-  int row = row0 + j * FEATURE_TILE;
+  int row = tid / (COLUMNS / QUAD);
+  int first = (tid % (COLUMNS / QUAD)) * QUAD;
   int y = y0 + row;
-  if (y >= HEIGHT) break;
-  int centre = (row + 3) * STRIDE + column + 4;
-  uint c = rows[centre] - LANE_OFFSET;
-  uint a = (max(c & 0xffffu, 1u) - 1u) | ((max(c >> 16, 1u) - 1u) << 16);
-  int index = ((y0 / FEATURE_TILE + j) * WIDTH + x) * FEATURE_TILE + row0;
-  uint chunk0 = 0u, chunk1 = 0u, chunk2 = 0u;
-    chunk2 |= ((rows[centre + (-3 * STRIDE + -4)] - a) & COMPARE_MASK) << 7;
-    chunk2 |= ((rows[centre + (-3 * STRIDE + -3)] - a) & COMPARE_MASK) << 6;
-    chunk2 |= ((rows[centre + (-3 * STRIDE + -2)] - a) & COMPARE_MASK) << 5;
-    chunk2 |= ((rows[centre + (-3 * STRIDE + -1)] - a) & COMPARE_MASK) << 4;
-    chunk2 |= ((rows[centre + (-3 * STRIDE + 1)] - a) & COMPARE_MASK) << 3;
-    chunk2 |= ((rows[centre + (-3 * STRIDE + 2)] - a) & COMPARE_MASK) << 2;
-    chunk2 |= ((rows[centre + (-3 * STRIDE + 3)] - a) & COMPARE_MASK) << 1;
-    chunk2 |= ((rows[centre + (-3 * STRIDE + 4)] - a) & COMPARE_MASK) << 0;
-    chunk2 |= ((rows[centre + (-2 * STRIDE + -4)] - a) & COMPARE_MASK) >> 1;
-    chunk2 |= ((rows[centre + (-2 * STRIDE + -3)] - a) & COMPARE_MASK) >> 2;
-    chunk2 |= ((rows[centre + (-2 * STRIDE + -2)] - a) & COMPARE_MASK) >> 3;
-    chunk2 |= ((rows[centre + (-2 * STRIDE + -1)] - a) & COMPARE_MASK) >> 4;
-    chunk2 |= ((rows[centre + (-2 * STRIDE + 1)] - a) & COMPARE_MASK) >> 5;
-    chunk2 |= ((rows[centre + (-2 * STRIDE + 2)] - a) & COMPARE_MASK) >> 6;
-    chunk2 |= ((rows[centre + (-2 * STRIDE + 3)] - a) & COMPARE_MASK) >> 7;
-    chunk2 |= ((rows[centre + (-2 * STRIDE + 4)] - a) & COMPARE_MASK) >> 8;
-    chunk1 |= ((rows[centre + (-1 * STRIDE + -4)] - a) & COMPARE_MASK) << 7;
-    chunk1 |= ((rows[centre + (-1 * STRIDE + -3)] - a) & COMPARE_MASK) << 6;
-    chunk1 |= ((rows[centre + (-1 * STRIDE + -2)] - a) & COMPARE_MASK) << 5;
-    chunk1 |= ((rows[centre + (-1 * STRIDE + -1)] - a) & COMPARE_MASK) << 4;
-    chunk1 |= ((rows[centre + (-1 * STRIDE + 1)] - a) & COMPARE_MASK) << 3;
-    chunk1 |= ((rows[centre + (-1 * STRIDE + 2)] - a) & COMPARE_MASK) << 2;
-    chunk1 |= ((rows[centre + (-1 * STRIDE + 3)] - a) & COMPARE_MASK) << 1;
-    chunk1 |= ((rows[centre + (-1 * STRIDE + 4)] - a) & COMPARE_MASK) << 0;
-    chunk1 |= ((rows[centre + (1 * STRIDE + -4)] - a) & COMPARE_MASK) >> 1;
-    chunk1 |= ((rows[centre + (1 * STRIDE + -3)] - a) & COMPARE_MASK) >> 2;
-    chunk1 |= ((rows[centre + (1 * STRIDE + -2)] - a) & COMPARE_MASK) >> 3;
-    chunk1 |= ((rows[centre + (1 * STRIDE + -1)] - a) & COMPARE_MASK) >> 4;
-    chunk1 |= ((rows[centre + (1 * STRIDE + 1)] - a) & COMPARE_MASK) >> 5;
-    chunk1 |= ((rows[centre + (1 * STRIDE + 2)] - a) & COMPARE_MASK) >> 6;
-    chunk1 |= ((rows[centre + (1 * STRIDE + 3)] - a) & COMPARE_MASK) >> 7;
-    chunk1 |= ((rows[centre + (1 * STRIDE + 4)] - a) & COMPARE_MASK) >> 8;
-    chunk0 |= ((rows[centre + (2 * STRIDE + -4)] - a) & COMPARE_MASK) << 7;
-    chunk0 |= ((rows[centre + (2 * STRIDE + -3)] - a) & COMPARE_MASK) << 6;
-    chunk0 |= ((rows[centre + (2 * STRIDE + -2)] - a) & COMPARE_MASK) << 5;
-    chunk0 |= ((rows[centre + (2 * STRIDE + -1)] - a) & COMPARE_MASK) << 4;
-    chunk0 |= ((rows[centre + (2 * STRIDE + 1)] - a) & COMPARE_MASK) << 3;
-    chunk0 |= ((rows[centre + (2 * STRIDE + 2)] - a) & COMPARE_MASK) << 2;
-    chunk0 |= ((rows[centre + (2 * STRIDE + 3)] - a) & COMPARE_MASK) << 1;
-    chunk0 |= ((rows[centre + (2 * STRIDE + 4)] - a) & COMPARE_MASK) << 0;
-    chunk0 |= ((rows[centre + (3 * STRIDE + -4)] - a) & COMPARE_MASK) >> 1;
-    chunk0 |= ((rows[centre + (3 * STRIDE + -3)] - a) & COMPARE_MASK) >> 2;
-    chunk0 |= ((rows[centre + (3 * STRIDE + -2)] - a) & COMPARE_MASK) >> 3;
-    chunk0 |= ((rows[centre + (3 * STRIDE + -1)] - a) & COMPARE_MASK) >> 4;
-    chunk0 |= ((rows[centre + (3 * STRIDE + 1)] - a) & COMPARE_MASK) >> 5;
-    chunk0 |= ((rows[centre + (3 * STRIDE + 2)] - a) & COMPARE_MASK) >> 6;
-    chunk0 |= ((rows[centre + (3 * STRIDE + 3)] - a) & COMPARE_MASK) >> 7;
-    chunk0 |= ((rows[centre + (3 * STRIDE + 4)] - a) & COMPARE_MASK) >> 8;
-  chunk0 = ~chunk0; chunk1 = ~chunk1; chunk2 = ~chunk2;
-  features[index] = uvec4((chunk0 & 0xffffu) | (chunk1 << 16), chunk2 & 0xffffu,
-                          (chunk0 >> 16) | (chunk1 & 0xffff0000u), chunk2 >> 16);
+  if (y >= HEIGHT) return;
+
+  uint a[QUAD];
+  for (int p = 0; p < QUAD; ++p) {
+    uint c = rows[(row + 3) * STRIDE + first + p + 4] - LANE_OFFSET;
+    a[p] = (max(c & 0xffffu, 1u) - 1u) | ((max(c >> 16, 1u) - 1u) << 16);
+  }
+  uint chunk[QUAD][3];
+  for (int p = 0; p < QUAD; ++p) chunk[p][0] = chunk[p][1] = chunk[p][2] = 0u;
+  // Rows -3 and -2 fill chunk 2, -1 and 1 chunk 1, 2 and 3 chunk 0: the
+  // upper row of each pair in bits 7..0, the lower in bits -1..-8.
+  for (int k = 0; k < 6; ++k) {
+    int dy = k < 3 ? k - 3 : k - 2;
+    uint words[QUAD + 8];
+    for (int w = 0; w < QUAD + 8; ++w) words[w] = rows[(row + 3 + dy) * STRIDE + first + w];
+    for (int p = 0; p < QUAD; ++p) {
+      uint bits = row_bits(words, p, a[p]);
+      int target = 2 - k / 2;
+      chunk[p][target] |= (k % 2 == 0) ? bits : (bits >> 8);
+    }
+  }
+  for (int p = 0; p < QUAD; ++p) {
+    int x = x0 + first + p;
+    if (x >= WIDTH) break;
+    uint chunk0 = ~chunk[p][0], chunk1 = ~chunk[p][1], chunk2 = ~chunk[p][2];
+    int index = ((y / FEATURE_TILE) * WIDTH + x) * FEATURE_TILE + y % FEATURE_TILE;
+    features[index] = uvec4((chunk0 & 0xffffu) | (chunk1 << 16), chunk2 & 0xffffu,
+                            (chunk0 >> 16) | (chunk1 & 0xffff0000u), chunk2 >> 16);
   }
 }

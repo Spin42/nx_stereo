@@ -13,8 +13,8 @@ layout(constant_id = 1) const int HEIGHT = 480;
 layout(set = 0, binding = 0) readonly buffer Left { float left_disparity[]; };
 layout(set = 0, binding = 1) readonly buffer Winners { uint winners[]; };
 layout(set = 0, binding = 2) writeonly buffer Output { float consistent[]; };
-#define MAX_WIDTH 4096
-shared uint right_winners[MAX_WIDTH];
+// Sized by the row, so as many workgroups fit on the GPU as its rows allow.
+shared uint right_winners[WIDTH];
 uint projected(int rx, int y) {
   return rx >= 0 && rx < WIDTH ? right_winners[rx] : 0xffffffffu;
 }
