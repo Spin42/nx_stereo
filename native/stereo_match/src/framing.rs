@@ -7,7 +7,7 @@ use std::io::{self, IoSlice, Read, Write};
 use std::os::fd::FromRawFd;
 #[cfg(test)]
 use std::os::fd::RawFd;
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 
 const TAG_LOG: u8 = 2;
 
@@ -104,7 +104,7 @@ impl Writer {
     /// Writes one record of `parts`, without joining them first. Safe to
     /// call from several threads.
     pub fn write_record_parts(&self, parts: &[&[u8]]) -> io::Result<()> {
-        let mut stdout = self.stdout.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stdout = self.stdout.lock().unwrap_or_else(PoisonError::into_inner);
         write_parts(&mut *stdout, parts)?;
         stdout.flush()
     }

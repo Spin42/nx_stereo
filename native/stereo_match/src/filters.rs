@@ -2,7 +2,7 @@
 //! `SpeckleFilter` and `TemporalFilter`, with the comparisons and `f32`
 //! operations of their Nx steps.
 
-use crate::parallel::{on_threads, RowQueue, Shared};
+use crate::parallel::{on_threads, Rows};
 
 /// Devillard's median selection networks, as `NxStereo.Image.median/2`
 /// applies them: compare-exchanges leaving the median of 9 and 25 values in
@@ -141,8 +141,7 @@ pub fn median(
     threads: usize,
 ) -> Vec<f32> {
     let mut filtered = vec![0.0; width * height];
-    let rows = RowQueue::new(height);
-    let shared = Shared::new(&mut filtered);
+    let rows = Rows::new(&mut filtered, width);
     on_threads(threads, &|_thread| {
         let mut values = Vec::new();
         let network: &[(usize, usize)] = if kernel_size == 3 {
@@ -150,21 +149,17 @@ pub fn median(
         } else {
             &MEDIAN_25
         };
-        while let Some(range) = rows.take() {
-            for y in range {
-                // SAFETY: the queue hands each row to one thread.
-                let filtered_row = unsafe { shared.slice_mut(y * width..(y + 1) * width) };
-                median_row(
-                    image,
-                    (width, height),
-                    y,
-                    kernel_size,
-                    network,
-                    &mut values,
-                    filtered_row,
-                );
-            }
-        }
+        rows.fill(|y, filtered_row| {
+            median_row(
+                image,
+                (width, height),
+                y,
+                kernel_size,
+                network,
+                &mut values,
+                filtered_row,
+            );
+        });
     });
     filtered
 }
@@ -240,40 +235,34 @@ pub fn despeckle(
         padded[start..start + width].copy_from_slice(row);
     }
     let mut despeckled = vec![0.0; width * height];
-    let rows = RowQueue::new(height);
-    let shared = Shared::new(&mut despeckled);
+    let rows = Rows::new(&mut despeckled, width);
     let padded = &padded;
     on_threads(threads, &|_thread| {
         let mut support = vec![0u32; width];
-        while let Some(range) = rows.take() {
-            for y in range {
-                support.fill(0);
-                let centre = &disparity[y * width..(y + 1) * width];
-                for dy in 0..2 * radius + 1 {
-                    for dx in 0..2 * radius + 1 {
-                        if (dy, dx) == (radius, radius) {
-                            continue;
-                        }
-                        let neighbours = &padded[(y + dy) * stride + dx..][..width];
-                        for ((support, &neighbour), &centre) in
-                            support.iter_mut().zip(neighbours).zip(centre)
-                        {
-                            let agrees =
-                                (neighbour > 0.0) & ((neighbour - centre).abs() <= max_difference);
-                            *support += u32::from(agrees);
-                        }
+        rows.fill(|y, despeckled_row| {
+            support.fill(0);
+            let centre = &disparity[y * width..(y + 1) * width];
+            for dy in 0..2 * radius + 1 {
+                for dx in 0..2 * radius + 1 {
+                    if (dy, dx) == (radius, radius) {
+                        continue;
+                    }
+                    let neighbours = &padded[(y + dy) * stride + dx..][..width];
+                    for ((support, &neighbour), &centre) in
+                        support.iter_mut().zip(neighbours).zip(centre)
+                    {
+                        let agrees =
+                            (neighbour > 0.0) & ((neighbour - centre).abs() <= max_difference);
+                        *support += u32::from(agrees);
                     }
                 }
-                // SAFETY: the queue hands each row to one thread.
-                let despeckled_row = unsafe { shared.slice_mut(y * width..(y + 1) * width) };
-                for ((pixel, &centre), &support) in
-                    despeckled_row.iter_mut().zip(centre).zip(&support)
-                {
-                    let kept = centre > 0.0 && support as f32 >= min_support;
-                    *pixel = if kept { centre } else { -1.0 };
-                }
             }
-        }
+            for ((pixel, &centre), &support) in despeckled_row.iter_mut().zip(centre).zip(&support)
+            {
+                let kept = centre > 0.0 && support as f32 >= min_support;
+                *pixel = if kept { centre } else { -1.0 };
+            }
+        });
     });
     despeckled
 }

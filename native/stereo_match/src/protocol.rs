@@ -27,10 +27,10 @@ use std::borrow::Cow;
 use crate::segment::{Geometry, Inputs, Options};
 use crate::tensor::{self, Tensor, Tensors};
 
-/// Apart from the tags of `framing`'s records, the log record's among them.
+// The replies' tags, distinct from the tag of `framing`'s log records.
 pub const TAG_CONFIGURED: u8 = 7;
-pub const TAG_OUTPUTS: u8 = 8;
-pub const TAG_REFUSED: u8 = 9;
+const TAG_OUTPUTS: u8 = 8;
+const TAG_REFUSED: u8 = 9;
 
 const CONFIGURE: u8 = 1;
 const RUN: u8 = 2;
@@ -139,13 +139,10 @@ pub fn parse(request: &[u8]) -> Result<Request, String> {
                         .map(|_| {
                             let name = reader.name()?;
                             let count = usize::from(reader.u16()?);
-                            let values = reader
-                                .take(4 * count)?
-                                .chunks_exact(4)
-                                .map(|chunk| {
-                                    f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])
-                                })
-                                .collect();
+                            let values = tensor::from_little_endian(
+                                reader.take(4 * count)?,
+                                f32::from_le_bytes,
+                            );
                             Ok((name, values))
                         })
                         .collect::<Result<Inputs, String>>()

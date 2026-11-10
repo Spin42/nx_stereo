@@ -1,7 +1,7 @@
 //! `NxStereo.Stage.Depth` and `PointCloud`: the metric depth, and
 //! the decimated cloud of the points within a range of depths.
 
-use crate::parallel::{on_threads, RowQueue, Shared};
+use crate::parallel::{on_threads, RowPairs};
 
 /// The farthest depth `u16` millimetres hold.
 const MAX_DEPTH_MM: f32 = 65_535.0;
@@ -18,20 +18,13 @@ pub fn depth(
 ) -> (Vec<u16>, Vec<f32>) {
     let focal_baseline = focal_length_px * baseline_m;
     let (mut depth_mm, mut depth_m) = (vec![0u16; disparity.len()], vec![0f32; disparity.len()]);
-    let rows = RowQueue::new(disparity.len() / width);
-    let (millimetres, metres) = (Shared::new(&mut depth_mm), Shared::new(&mut depth_m));
+    let rows = RowPairs::new(&mut depth_mm, &mut depth_m, width);
     on_threads(threads, &|_thread| {
-        while let Some(range) = rows.take() {
-            let pixels = range.start * width..range.end * width;
-            // SAFETY: the queue hands each row to one thread.
-            let (millimetres, metres) = unsafe {
-                (
-                    millimetres.slice_mut(pixels.clone()),
-                    metres.slice_mut(pixels.clone()),
-                )
-            };
-            for ((&pixel_disparity, metres), millimetres) in
-                disparity[pixels].iter().zip(metres).zip(millimetres)
+        rows.fill(|y, millimetres, metres| {
+            for ((&pixel_disparity, metres), millimetres) in disparity[y * width..(y + 1) * width]
+                .iter()
+                .zip(metres)
+                .zip(millimetres)
             {
                 *metres = if pixel_disparity > 0.0 {
                     focal_baseline / pixel_disparity
@@ -45,7 +38,7 @@ pub fn depth(
                     rounded.max(0.0) as u16
                 };
             }
-        }
+        });
     });
     (depth_mm, depth_m)
 }

@@ -4,6 +4,7 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::ops::Deref;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Elements {
@@ -66,24 +67,9 @@ impl Tensor {
         }
         let elements = match type_code {
             TYPE_U8 => Elements::U8(bytes.to_vec()),
-            TYPE_U16 => Elements::U16(
-                bytes
-                    .chunks_exact(2)
-                    .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-                    .collect(),
-            ),
-            TYPE_F32 => Elements::F32(
-                bytes
-                    .chunks_exact(4)
-                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                    .collect(),
-            ),
-            _ => Elements::S32(
-                bytes
-                    .chunks_exact(4)
-                    .map(|chunk| i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                    .collect(),
-            ),
+            TYPE_U16 => Elements::U16(from_little_endian(bytes, u16::from_le_bytes)),
+            TYPE_F32 => Elements::F32(from_little_endian(bytes, f32::from_le_bytes)),
+            _ => Elements::S32(from_little_endian(bytes, i32::from_le_bytes)),
         };
         Ok(Tensor { shape, elements })
     }
@@ -92,20 +78,22 @@ impl Tensor {
     pub fn bytes(&self) -> Cow<'_, [u8]> {
         match &self.elements {
             Elements::U8(values) => Cow::Borrowed(values),
-            Elements::U16(values) => little_endian_bytes(values, |value| value.to_le_bytes()),
-            Elements::F32(values) => little_endian_bytes(values, |value| value.to_le_bytes()),
-            Elements::S32(values) => little_endian_bytes(values, |value| value.to_le_bytes()),
+            Elements::U16(values) => little_endian_bytes(values, u16::to_le_bytes),
+            Elements::F32(values) => little_endian_bytes(values, f32::to_le_bytes),
+            Elements::S32(values) => little_endian_bytes(values, i32::to_le_bytes),
         }
     }
+}
 
-    pub fn byte_length(&self) -> usize {
-        match &self.elements {
-            Elements::U8(values) => values.len(),
-            Elements::U16(values) => 2 * values.len(),
-            Elements::F32(values) => 4 * values.len(),
-            Elements::S32(values) => 4 * values.len(),
-        }
-    }
+/// The values of `N` little-endian bytes each that `bytes` holds.
+pub fn from_little_endian<T, const N: usize>(
+    bytes: &[u8],
+    from_le_bytes: fn([u8; N]) -> T,
+) -> Vec<T> {
+    bytes
+        .chunks_exact(N)
+        .map(|chunk| from_le_bytes(chunk.try_into().unwrap()))
+        .collect()
 }
 
 /// `values` as little-endian bytes: their memory, on a little-endian CPU.
@@ -139,18 +127,16 @@ pub fn u8_image<'a>(
     name: &str,
     shape: [usize; 2],
 ) -> Result<&'a [u8], String> {
-    match tensors.get(name) {
-        Some(Tensor {
-            shape: found,
-            elements: Elements::U8(values),
-        }) if found[..] == shape => Ok(values),
-        Some(tensor) => Err(format!(
-            "{name} is a {:?} tensor of type {}, expected a {shape:?} u8 image",
-            tensor.shape,
-            tensor.type_code()
-        )),
-        None => Err(format!("no {name} among the segment's tensors")),
-    }
+    shaped(
+        tensors.get(name),
+        name,
+        shape,
+        "u8 image",
+        |tensor| match &tensor.elements {
+            Elements::U8(values) => Some(&values[..]),
+            _ => None,
+        },
+    )
 }
 
 /// The `f32` map `name`, of `shape`.
@@ -159,18 +145,54 @@ pub fn f32_map<'a>(
     name: &str,
     shape: [usize; 2],
 ) -> Result<&'a [f32], String> {
-    match tensors.get(name) {
-        Some(Tensor {
-            shape: found,
-            elements: Elements::F32(values),
-        }) if found[..] == shape => Ok(values),
-        Some(tensor) => Err(format!(
-            "{name} is a {:?} tensor of type {}, expected a {shape:?} f32 map",
-            tensor.shape,
-            tensor.type_code()
-        )),
-        None => Err(format!("no {name} among the segment's tensors")),
+    shaped(
+        tensors.get(name),
+        name,
+        shape,
+        "f32 map",
+        |tensor| match &tensor.elements {
+            Elements::F32(values) => Some(&values[..]),
+            _ => None,
+        },
+    )
+}
+
+/// The `f32` map `name`, of `shape`, to change in place.
+pub fn f32_map_mut<'a>(
+    tensors: &'a mut Tensors,
+    name: &str,
+    shape: [usize; 2],
+) -> Result<&'a mut [f32], String> {
+    shaped(
+        tensors.get_mut(name),
+        name,
+        shape,
+        "f32 map",
+        |tensor| match &mut tensor.elements {
+            Elements::F32(values) => Some(&mut values[..]),
+            _ => None,
+        },
+    )
+}
+
+/// The `values` of `tensor`, found as `name`, when it is the `shape`
+/// tensor of the type `kind` names.
+fn shaped<R: Deref<Target = Tensor>, V>(
+    tensor: Option<R>,
+    name: &str,
+    shape: [usize; 2],
+    kind: &str,
+    values: impl FnOnce(R) -> Option<V>,
+) -> Result<V, String> {
+    let tensor = tensor.ok_or_else(|| format!("no {name} among the segment's tensors"))?;
+    let type_code = tensor.type_code();
+    let refusal = |found: &[usize]| {
+        format!("{name} is a {found:?} tensor of type {type_code}, expected a {shape:?} {kind}")
+    };
+    if tensor.shape[..] != shape {
+        return Err(refusal(&tensor.shape));
     }
+    values(tensor).ok_or_else(|| refusal(&shape))
 }
 
 #[cfg(test)]
@@ -186,7 +208,11 @@ mod tests {
             Tensor::new(vec![], Elements::S32(vec![-7])),
         ] {
             let bytes = tensor.bytes();
-            assert_eq!(bytes.len(), tensor.byte_length());
+            let elements: usize = tensor.shape.iter().product();
+            assert_eq!(
+                bytes.len(),
+                elements * element_bytes(tensor.type_code()).unwrap()
+            );
             let back = Tensor::from_bytes(tensor.type_code(), tensor.shape.clone(), &bytes);
             assert_eq!(back, Ok(tensor));
         }

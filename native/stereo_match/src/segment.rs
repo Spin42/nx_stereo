@@ -13,7 +13,7 @@ use crate::depth::{self, Intrinsics};
 use crate::filters::{self, Temporal, TemporalSettings};
 use crate::measures::{self, Alignment, Quality};
 use crate::rectify::{self, Camera, Map};
-use crate::tensor::{f32_map, u8_image, Elements, Tensor, Tensors};
+use crate::tensor::{f32_map, f32_map_mut, u8_image, Elements, Tensor, Tensors};
 use crate::{Matcher, Parameters};
 
 /// The sizes every stage works with: the rectified images' and the
@@ -30,8 +30,14 @@ pub struct Geometry {
 pub type Options = HashMap<String, f64>;
 /// A stage's live inputs for one pair, its `params/2` values as `f32`.
 pub type Inputs = HashMap<String, Vec<f32>>;
-/// The tensors a run filled, by name, and each stage's time in microseconds.
-pub type Outputs = (Vec<(String, Tensor)>, Vec<u32>);
+/// What a run returns.
+#[derive(Debug)]
+pub struct Outputs {
+    /// The tensors the stages filled, by name.
+    pub tensors: Vec<(String, Tensor)>,
+    /// Each stage's time in microseconds.
+    pub times_us: Vec<u32>,
+}
 
 enum Stage {
     Rectification {
@@ -226,7 +232,10 @@ impl Segment {
                 )
             })
             .collect();
-        Ok((outputs, times_us))
+        Ok(Outputs {
+            tensors: outputs,
+            times_us,
+        })
     }
 }
 
@@ -323,6 +332,25 @@ fn stage(
     })
 }
 
+/// The map `slot` keeps for `camera`, built when the slot holds none or
+/// one for another camera.
+fn rectification_map<'a>(
+    slot: &'a mut Option<(Camera, Map)>,
+    camera: Camera,
+    geometry: &Geometry,
+) -> &'a Map {
+    let kept = slot.take().filter(|(cached, _map)| *cached == camera);
+    let (_camera, map) = slot.insert(kept.unwrap_or_else(|| {
+        let map = Map::new(
+            &camera,
+            (geometry.width, geometry.height),
+            (geometry.frame_width, geometry.frame_height),
+        );
+        (camera, map)
+    }));
+    map
+}
+
 fn run_stage(
     stage: &mut Stage,
     geometry: &Geometry,
@@ -336,23 +364,12 @@ fn run_stage(
     match stage {
         Stage::Rectification { maps } => {
             let frame_shape = [geometry.frame_height, geometry.frame_width];
-            for (side, map) in ["left", "right"].into_iter().zip(maps.iter_mut()) {
-                let camera = camera(inputs, side)?;
-                if map.as_ref().is_none_or(|(cached, _map)| *cached != camera) {
-                    let built = Map::new(
-                        &camera,
-                        (width, height),
-                        (geometry.frame_width, geometry.frame_height),
-                    );
-                    *map = Some((camera, built));
-                }
-            }
+            let [left_slot, right_slot] = &mut **maps;
+            let left_map = rectification_map(left_slot, camera(inputs, "left")?, geometry);
+            let right_map = rectification_map(right_slot, camera(inputs, "right")?, geometry);
             let left_frame = u8_image(tensors, "left_frame", frame_shape)?;
             let right_frame = u8_image(tensors, "right_frame", frame_shape)?;
             let (mut left, mut right) = (vec![0; width * height], vec![0; width * height]);
-            let [Some((_, left_map)), Some((_, right_map))] = &**maps else {
-                unreachable!()
-            };
             rectify::rectify_pair(
                 [left_map, right_map],
                 [left_frame, right_frame],
@@ -446,15 +463,7 @@ fn run_stage(
                 delta: scalar(inputs, "delta")?,
                 hold: scalar(inputs, "hold")?,
             };
-            f32_map(tensors, "disparity", size)?;
-            let Some(Tensor {
-                elements: Elements::F32(disparity),
-                ..
-            }) = tensors.get_mut("disparity")
-            else {
-                unreachable!()
-            };
-            temporal.filter(disparity, &settings);
+            temporal.filter(f32_map_mut(tensors, "disparity", size)?, &settings);
         }
         Stage::Depth => {
             let (depth_mm, depth_m) = depth::depth(
@@ -525,13 +534,15 @@ mod tests {
             .collect()
     }
 
+    /// Why a segment of the one stage `kind` with settings `values` is refused.
+    fn refused(kind: &str, values: &[(&str, f64)]) -> String {
+        Segment::new(geometry(), &[(kind.to_string(), options(values))], 2)
+            .err()
+            .unwrap()
+    }
+
     #[test]
     fn refuses_unknown_kinds_and_settings() {
-        let refused = |kind: &str, values: &[(&str, f64)]| {
-            Segment::new(geometry(), &[(kind.to_string(), options(values))], 2)
-                .err()
-                .unwrap()
-        };
         assert!(refused("decode", &[]).contains("no native implementation of decode"));
         assert!(refused("median_filter", &[("kernel_size", 7.0)]).contains("[3, 5]"));
         assert!(refused("disparity", &[("num_disparities", 64.0)]).contains("paths"));
@@ -551,11 +562,6 @@ mod tests {
 
     #[test]
     fn needs_the_constants_each_stage_shares_with_its_nx_step() {
-        let refused = |kind: &str, values: &[(&str, f64)]| {
-            Segment::new(geometry(), &[(kind.to_string(), options(values))], 2)
-                .err()
-                .unwrap()
-        };
         assert_eq!(
             refused("temporal_filter", &[]),
             "temporal_filter needs its max_missed setting"
@@ -621,10 +627,13 @@ mod tests {
         ];
         let disparity = Tensor::new(vec![24, 32], Elements::F32(vec![10.0; 32 * 24]));
         let tensors = Tensors::from([("disparity".to_string(), disparity)]);
-        let (outputs, times) = segment.run(&inputs, tensors).unwrap();
+        let Outputs {
+            tensors: outputs,
+            times_us,
+        } = segment.run(&inputs, tensors).unwrap();
         let names: Vec<&str> = outputs.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, ["disparity", "depth_mm"]);
-        assert_eq!(times.len(), 3);
+        assert_eq!(times_us.len(), 3);
         assert_eq!(outputs[0].1.elements, Elements::F32(vec![-1.0; 32 * 24]));
         assert_eq!(outputs[1].1.elements, Elements::U16(vec![1000; 32 * 24]));
     }
@@ -660,7 +669,7 @@ mod tests {
             let image = Tensor::new(vec![height, width], Elements::U8(image));
             (side.to_string(), image)
         }));
-        let (outputs, _times) = segment.run(&inputs, tensors).unwrap();
+        let outputs = segment.run(&inputs, tensors).unwrap().tensors;
         let unmatched_at_0 = matched
             .iter()
             .map(|&disparity| if disparity > 0.0 { disparity } else { -1.0 })
@@ -680,5 +689,90 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.contains("expected a [24, 32] f32 map"), "{error}");
+    }
+
+    #[test]
+    fn rectifies_with_the_maps_of_the_cameras_it_is_given() {
+        let geometry = geometry();
+        let (width, height) = (geometry.width, geometry.height);
+        let members = [("rectification".to_string(), Options::new())];
+        let mut segment = Segment::new(geometry, &members, 2).unwrap();
+        let camera = |cx: f32| Camera {
+            camera_matrix: [100.0, 0.0, cx, 0.0, 100.0, 12.0, 0.0, 0.0, 1.0],
+            distortion: [0.01, 0.0, 0.0, 0.0, 0.0],
+            inverse_pr: [0.01, 0.0, -0.16, 0.0, 0.01, -0.12, 0.0, 0.0, 1.0],
+        };
+        let inputs = |cameras: [&Camera; 2]| -> Vec<Inputs> {
+            vec![["left", "right"]
+                .into_iter()
+                .zip(cameras)
+                .flat_map(|(side, camera)| {
+                    [
+                        (format!("{side}.k"), camera.camera_matrix.to_vec()),
+                        (format!("{side}.d"), camera.distortion.to_vec()),
+                        (format!("{side}.inverse_pr"), camera.inverse_pr.to_vec()),
+                    ]
+                })
+                .collect()]
+        };
+        let frames = [
+            crate::tests::noise(width, height, 1),
+            crate::tests::noise(width, height, 2),
+        ];
+        let image = |pixels: Vec<u8>| Tensor::new(vec![height, width], Elements::U8(pixels));
+        // The right camera changes on the second pair, the left one does not.
+        for cameras in [[camera(16.0), camera(16.0)], [camera(16.0), camera(18.5)]] {
+            let entries = Tensors::from([
+                ("left_frame".to_string(), image(frames[0].clone())),
+                ("right_frame".to_string(), image(frames[1].clone())),
+            ]);
+            let cameras = [&cameras[0], &cameras[1]];
+            let outputs = segment.run(&inputs(cameras), entries).unwrap();
+            let maps = cameras.map(|camera| Map::new(camera, (width, height), (width, height)));
+            let (mut left, mut right) = (vec![0; width * height], vec![0; width * height]);
+            rectify::rectify_pair(
+                [&maps[0], &maps[1]],
+                [&frames[0], &frames[1]],
+                width,
+                [&mut left, &mut right],
+                1,
+            );
+            assert_eq!(
+                outputs.tensors,
+                [
+                    ("left".to_string(), image(left)),
+                    ("right".to_string(), image(right))
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn filters_the_disparity_against_the_previous_pair() {
+        let members = [(
+            "temporal_filter".to_string(),
+            options(&[("max_missed", 255.0)]),
+        )];
+        let mut segment = Segment::new(geometry(), &members, 1).unwrap();
+        let inputs: Vec<Inputs> = vec![[("alpha", 0.5), ("delta", 2.0), ("hold", 1.0)]
+            .map(|(name, value)| (name.to_string(), vec![value]))
+            .into()];
+        let settings = TemporalSettings {
+            alpha: 0.5,
+            delta: 2.0,
+            hold: 1.0,
+        };
+        let mut temporal = Temporal::new(32 * 24, 255.0);
+        let map = |values: Vec<f32>| Tensor::new(vec![24, 32], Elements::F32(values));
+        let second: Vec<f32> = (0..32 * 24)
+            .map(|i| if i % 3 == 0 { -1.0 } else { 11.0 })
+            .collect();
+        for pair in [vec![10.0; 32 * 24], second] {
+            let entries = Tensors::from([("disparity".to_string(), map(pair.clone()))]);
+            let outputs = segment.run(&inputs, entries).unwrap();
+            let mut want = pair;
+            temporal.filter(&mut want, &settings);
+            assert_eq!(outputs.tensors, [("disparity".to_string(), map(want))]);
+        }
     }
 }

@@ -115,8 +115,8 @@ fn serve() -> io::Result<()> {
             for reply in computed {
                 match reply {
                     Reply::Configured => stdout.write_record(&[TAG_CONFIGURED])?,
-                    Reply::Outputs((outputs, times_us)) => {
-                        let parts = protocol::outputs_record(&times_us, &outputs);
+                    Reply::Outputs(Outputs { tensors, times_us }) => {
+                        let parts = protocol::outputs_record(&times_us, &tensors);
                         let parts: Vec<&[u8]> = parts.iter().map(|part| &part[..]).collect();
                         stdout.write_record_parts(&parts)?;
                     }
@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn takes_a_thread_count() {
-        let arguments = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let arguments = |list: &[&str]| list.iter().copied().map(String::from).collect::<Vec<_>>();
         assert!(threads(&arguments(&[])).unwrap() >= 1);
         assert_eq!(threads(&arguments(&["--threads", "4"])), Ok(4));
         assert!(threads(&arguments(&["--threads", "0"])).is_err());

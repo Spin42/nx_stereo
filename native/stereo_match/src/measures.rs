@@ -98,7 +98,7 @@ pub fn alignment_sums(
                 for (offset, sum) in sums[..2 * reach + 1].iter_mut().enumerate() {
                     let source_y = (y + offset).saturating_sub(reach).min(height - 1);
                     let difference = i32::from(right[source_y * width + source_x]) - grey;
-                    *sum += difference.unsigned_abs() as u64;
+                    *sum += u64::from(difference.unsigned_abs());
                 }
                 sums[2 * reach + 1] += 1;
             }

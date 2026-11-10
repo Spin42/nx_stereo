@@ -5,7 +5,7 @@
 //! through it as the Nx stage samples, so the images are those of the Nx
 //! stage.
 
-use crate::parallel::{on_threads, RowQueue, Shared};
+use crate::parallel::{on_threads, RowPairs};
 
 /// A camera as `NxStereo.Rectify.camera/4` builds it, after
 /// `NxStereo.Stage.Rectification` has moved its rows: the camera
@@ -22,7 +22,6 @@ pub struct Camera {
 /// the weights of the right and lower ones.
 pub struct Map {
     width: usize,
-    height: usize,
     columns: Vec<i32>,
     rows: Vec<i32>,
     column_weights: Vec<f32>,
@@ -39,7 +38,6 @@ impl Map {
         let pixels = width * height;
         let mut map = Map {
             width,
-            height,
             columns: Vec::with_capacity(pixels),
             rows: Vec::with_capacity(pixels),
             column_weights: Vec::with_capacity(pixels),
@@ -138,20 +136,13 @@ pub fn rectify_pair(
     outputs: [&mut [u8]; 2],
     threads: usize,
 ) {
-    let height = maps[0].height;
-    let width = maps[0].width;
-    let rows = RowQueue::new(2 * height);
     let [left, right] = outputs;
-    let outputs = [Shared::new(left), Shared::new(right)];
+    let rows = RowPairs::new(left, right, maps[0].width);
     on_threads(threads, &|_thread| {
-        while let Some(range) = rows.take() {
-            for row in range {
-                let (side, v) = (row / height, row % height);
-                // SAFETY: the queue hands each row to one thread.
-                let rectified_row = unsafe { outputs[side].slice_mut(v * width..(v + 1) * width) };
-                maps[side].rectify_row(frames[side], frame_width, v, rectified_row);
-            }
-        }
+        rows.fill(|v, left_row, right_row| {
+            maps[0].rectify_row(frames[0], frame_width, v, left_row);
+            maps[1].rectify_row(frames[1], frame_width, v, right_row);
+        });
     });
 }
 
