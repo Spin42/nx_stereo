@@ -70,7 +70,61 @@ defmodule NxStereo.Rectify do
             "rectify/3 only shrinks, got #{in_height}x#{in_width} to #{height}x#{width}"
     end
 
-    rectify_n(image, camera, size: size, scale: {in_width / width, in_height / height})
+    opts = [size: size, scale: {in_width / width, in_height / height}]
+
+    if Nx.type(image) == {:u, 8} and rem(width, 4) == 0 do
+      NxStereo.Kernels.rectify(image, camera_vector(camera), size, fn [image, vector] ->
+        rectify_n(image, camera_map(vector), opts)
+      end)
+    else
+      rectify_n(image, camera, opts)
+    end
+  end
+
+  @doc """
+  `rectify/3` of a frame packed as `u32` words, four pixels a word (see
+  `NxStereo.Packing`), for a GPU without 8-bit storage: returns the
+  rectified image as `s32` pixels and as packed words. Takes `rectify/3`'s
+  options; the rectified width must be a multiple of 4.
+  """
+  deftransform rectify_packed(frame, camera, opts \\ []) do
+    {frame_height, words} = Nx.shape(frame)
+    {height, width} = size = Keyword.get(opts, :size, {frame_height, words * 4})
+
+    if rem(width, 4) != 0 do
+      raise ArgumentError,
+            "rectify_packed/3 needs a width that is a multiple of 4, got #{width}"
+    end
+
+    if height > frame_height or width > words * 4 do
+      raise ArgumentError,
+            "rectify/3 only shrinks, got #{frame_height}x#{words * 4} to #{height}x#{width}"
+    end
+
+    opts = [size: size, scale: {words * 4 / width, frame_height / height}]
+
+    NxStereo.Kernels.rectify(frame, camera_vector(camera), size, fn [frame, vector] ->
+      image =
+        frame
+        |> NxStereo.Packing.unpack({:u, 8})
+        |> rectify_n(camera_map(vector), opts)
+        |> Nx.as_type(:s32)
+
+      {image, NxStereo.Packing.pack_image(image)}
+    end)
+  end
+
+  # The camera as one f32 vector, a kernel's input: k, d and inverse_pr, row-major.
+  defp camera_vector(camera) do
+    Nx.concatenate([Nx.flatten(camera.k), camera.d, Nx.flatten(camera.inverse_pr)])
+  end
+
+  defp camera_map(vector) do
+    %{
+      k: vector |> Nx.slice([0], [9]) |> Nx.reshape({3, 3}),
+      d: Nx.slice(vector, [9], [5]),
+      inverse_pr: vector |> Nx.slice([14], [9]) |> Nx.reshape({3, 3})
+    }
   end
 
   defnp rectify_n(image, camera, opts) do
