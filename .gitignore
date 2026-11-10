@@ -3,3 +3,9 @@
 /doc/
 erl_crash.dump
 *.ez
+
+# Temporary files, for example, from tests.
+/tmp/
+
+# The native backend's cargo build.
+/native/target/
