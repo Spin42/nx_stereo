@@ -5,17 +5,15 @@
 struct SelectGeometry {
   int x;
   uint lane_disparity;
-  uint base;
   // Candidates right of the image (d > x) never win: they carry a padding
   // term that exceeds every genuine sum, which also excludes them from the
   // second-best search. Winner keys and minima are read from unpadded lanes.
   uint pad[BLOCK];
 };
-SelectGeometry select_geometry(int x, uint lane, uint base) {
+SelectGeometry select_geometry(int x, uint lane) {
   SelectGeometry s;
   s.x = x;
   s.lane_disparity = lane * BLOCK;
-  s.base = base;
   for (int k = 0; k < BLOCK; ++k) s.pad[k] = int(lane) * BLOCK + k <= x ? 0u : 0x8000u;
   return s;
 }

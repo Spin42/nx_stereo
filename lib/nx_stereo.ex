@@ -25,6 +25,7 @@ defmodule NxStereo do
   import Nx.Defn
 
   @census_bound 48
+  @defaults [disparities: 64, p1: 8, p2: 64, uniqueness: 1.0526315789473684, paths: 8]
   # Use as Nx.u32(@invalid_key): defn narrows untyped literals to s32
   @invalid_key 0xFFFFFFFF
 
@@ -60,42 +61,37 @@ defmodule NxStereo do
   wide.
   """
   deftransform sgm(left, right, opts \\ []) do
-    opts =
-      Keyword.validate!(opts,
-        disparities: 64,
-        p1: 8,
-        p2: 64,
-        uniqueness: 1.0526315789473684,
-        paths: 8
-      )
+    opts = Keyword.validate!(opts, @defaults)
+    {config, left, right, penalties, output} = prepare!(left, right, opts, "NxStereo.sgm/3")
 
-    config = config!(left, right, opts)
-    penalties = Nx.stack(Enum.map([opts[:p1], opts[:p2], opts[:uniqueness]], &to_f32/1))
-    left = Nx.as_type(left, :s32)
-    right = Nx.as_type(right, :s32)
-    output = Nx.template({config.height, config.width}, :f32)
-
-    case NxStereo.Vulkan.pipeline(config) do
-      nil ->
-        sgm_n(left, right, penalties, Map.to_list(config))
-
-      pipeline ->
-        Nx.block(pipeline, [left, right, penalties], output, fn _, l, r, p ->
-          sgm_n(l, r, p, Map.to_list(config))
-        end)
-    end
+    NxStereo.Kernels.block(
+      [left, right, penalties],
+      output,
+      fn [left, right, penalties] -> sgm_n(left, right, penalties, Map.to_list(config)) end,
+      fn -> NxStereo.Vulkan.pipeline(config) end
+    )
   end
 
-  defp to_f32(%Nx.Tensor{} = value), do: Nx.as_type(value, :f32)
-  defp to_f32(value), do: Nx.f32(value)
+  @doc false
+  # The settings sgm/3 takes by default, which NxStereo.Stage.Disparity shares.
+  def defaults, do: @defaults
 
-  defp config!(left, right, opts) do
+  # What sgm/3 and sgm_band/4 start with: the matching's settings, both images as
+  # s32, the penalties as the f32 vector the shaders read, and the output's template.
+  defp prepare!(left, right, opts, caller) do
+    config = config!(left, right, opts, caller)
+    penalties = NxStereo.Kernels.scalars([opts[:p1], opts[:p2], opts[:uniqueness]])
+    output = Nx.template({config.height, config.width}, :f32)
+    {config, Nx.as_type(left, :s32), Nx.as_type(right, :s32), penalties, output}
+  end
+
+  defp config!(left, right, opts, caller) do
     left = Nx.to_template(left)
     right = Nx.to_template(right)
 
     unless left.type in [{:u, 8}, {:s, 32}] and right.type == left.type do
       raise ArgumentError,
-            "NxStereo.sgm/3 expects u8 or s32 images, got #{inspect(left.type)} and #{inspect(right.type)}"
+            "#{caller} expects u8 or s32 images, got #{inspect(left.type)} and #{inspect(right.type)}"
     end
 
     {height, width} =
@@ -105,7 +101,7 @@ defmodule NxStereo do
 
         shapes ->
           raise ArgumentError,
-                "NxStereo.sgm/3 expects two images of the same {height, width} shape, larger than 6x8 and at most 4096 wide, got #{inspect(shapes)}"
+                "#{caller} expects two images of the same {height, width} shape, larger than 6x8 and at most 4096 wide, got #{inspect(shapes)}"
       end
 
     disparities = opts[:disparities]
@@ -163,17 +159,10 @@ defmodule NxStereo do
   Images must have an even height and width.
   """
   deftransform sgm_coarse_to_fine(left, right, opts \\ []) do
-    opts =
-      Keyword.validate!(opts,
-        disparities: 128,
-        p1: 8,
-        p2: 64,
-        uniqueness: 1.0526315789473684,
-        paths: 8,
-        band: 16,
-        margin: 4,
-        coarse_paths: nil
-      )
+    defaults =
+      Keyword.put(@defaults, :disparities, 128) ++ [band: 16, margin: 4, coarse_paths: nil]
+
+    opts = Keyword.validate!(opts, defaults)
 
     {height, width} = Nx.shape(left)
 
@@ -212,16 +201,17 @@ defmodule NxStereo do
   deftransformp shrink_pair(left, right) do
     {height, width} = Nx.shape(left)
 
-    case Nx.type(left) == {:s, 32} && NxStereo.Vulkan.shrink_pipeline(height, width) do
-      pipeline when is_struct(pipeline) ->
-        half = Nx.template({div(height, 2), div(width, 2)}, :s32)
+    if Nx.type(left) == {:s, 32} do
+      half = Nx.template({div(height, 2), div(width, 2)}, :s32)
 
-        Nx.block(pipeline, [left, right], {half, half}, fn _, left, right ->
-          {shrink(left), shrink(right)}
-        end)
-
-      _ ->
-        {shrink(left), shrink(right)}
+      NxStereo.Kernels.block(
+        [left, right],
+        {half, half},
+        fn [left, right] -> {shrink(left), shrink(right)} end,
+        fn -> NxStereo.Vulkan.shrink_pipeline(height, width) end
+      )
+    else
+      {shrink(left), shrink(right)}
     end
   end
 
@@ -230,15 +220,12 @@ defmodule NxStereo do
     {height, width} = Nx.shape(coarse)
     {height, width} = {2 * height, 2 * width}
 
-    case NxStereo.Vulkan.band_base_pipeline(height, width, margin, 128 - band) do
-      nil ->
-        band_base(coarse, band, margin)
-
-      pipeline ->
-        Nx.block(pipeline, [coarse], Nx.template({height, width}, :s32), fn _, coarse ->
-          band_base(coarse, band, margin)
-        end)
-    end
+    NxStereo.Kernels.block(
+      [coarse],
+      Nx.template({height, width}, :s32),
+      fn [coarse] -> band_base(coarse, band, margin) end,
+      fn -> NxStereo.Vulkan.band_base_pipeline(height, width, margin, 128 - band) end
+    )
   end
 
   # The 2x2 average, rounded, in the image's type
@@ -288,18 +275,11 @@ defmodule NxStereo do
   `base + band` within `:disparities`. Defaults to 16.
   """
   deftransform sgm_band(left, right, base, opts \\ []) do
-    opts =
-      Keyword.validate!(opts,
-        disparities: 64,
-        p1: 8,
-        p2: 64,
-        uniqueness: 1.0526315789473684,
-        paths: 8,
-        band: 16
-      )
-
-    config = config!(left, right, Keyword.delete(opts, :band))
+    opts = Keyword.validate!(opts, @defaults ++ [band: 16])
     band = opts[:band]
+
+    {config, left, right, penalties, output} =
+      prepare!(left, right, Keyword.delete(opts, :band), "NxStereo.sgm_band/4")
 
     unless band in [8, 16, 32, 64] do
       raise ArgumentError, ":band must be 8, 16, 32 or 64, got #{inspect(band)}"
@@ -313,22 +293,16 @@ defmodule NxStereo do
               "got #{inspect(base_template.type)} #{inspect(base_template.shape)}"
     end
 
-    penalties = Nx.stack(Enum.map([opts[:p1], opts[:p2], opts[:uniqueness]], &to_f32/1))
-
     config = Map.put(config, :band, band)
-    left = Nx.as_type(left, :s32)
-    right = Nx.as_type(right, :s32)
-    output = Nx.template({config.height, config.width}, :f32)
 
-    case NxStereo.Vulkan.band_pipeline(config) do
-      nil ->
+    NxStereo.Kernels.block(
+      [left, right, penalties, base],
+      output,
+      fn [left, right, penalties, base] ->
         band_n(left, right, base, penalties, Map.to_list(config))
-
-      pipeline ->
-        Nx.block(pipeline, [left, right, penalties, base], output, fn _, l, r, p, b ->
-          band_n(l, r, b, p, Map.to_list(config))
-        end)
-    end
+      end,
+      fn -> NxStereo.Vulkan.band_pipeline(config) end
+    )
   end
 
   defnp band_n(left, right, base, penalties, opts) do
@@ -497,26 +471,16 @@ defmodule NxStereo do
   # centre, so that sensor noise on flat surfaces does not flip bits. Borders
   # are replicated.
   deftransformp census(image) do
-    centre = image
-
     neighbours()
     |> Enum.with_index()
     |> Enum.reduce(Nx.broadcast(Nx.u64(0), image), fn {{dy, dx}, bit}, acc ->
-      below = Nx.less(Nx.add(shift(image, dy, dx), 1), centre) |> Nx.as_type(:u64)
+      below = Nx.less(Nx.add(NxStereo.Image.shift(image, dy, dx), 1), image) |> Nx.as_type(:u64)
       Nx.bitwise_or(acc, Nx.left_shift(below, bit))
     end)
   end
 
   defp neighbours do
     for dy <- -3..3, dy != 0, dx <- -4..4, dx != 0, do: {dy, dx}
-  end
-
-  # image[clamp(y + dy), clamp(x + dx)]
-  deftransformp shift(image, dy, dx) do
-    {height, width} = image.shape
-    rows = Nx.clip(Nx.add(Nx.iota({height}), dy), 0, height - 1)
-    columns = Nx.clip(Nx.add(Nx.iota({width}), dx), 0, width - 1)
-    image |> Nx.take(rows, axis: 0) |> Nx.take(columns, axis: 1)
   end
 
   # costs[y, x, d] = popcount(left[y, x] ^ right[y, x - d]), right features
@@ -625,7 +589,6 @@ defmodule NxStereo do
     accepted = Nx.as_type(second, :f32) > minimum_f * penalties[2]
     denominator = lower + upper - 2 * minimum_f
     correction = Nx.clip((lower - upper) / (2 * Nx.max(denominator, 1)), -0.5, 0.5)
-    x = Nx.iota({1, width, 1}, axis: 1)
     refine = denominator > 0 and winner > 0 and winner < Nx.min(disparities - 1, x)
     disparity = Nx.as_type(winner, :f32) + Nx.select(refine, correction, 0.0)
 

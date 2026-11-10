@@ -35,8 +35,7 @@ defmodule NxStereo.ChainTest do
   @tag :vulkan
   test "rectify, match, filter, depth and cloud compile into one module and match the reference",
        %{tmp_dir: dir} do
-    {:ok, devices} = NxIREE.list_devices("vulkan")
-    device = Enum.find(devices, &String.contains?(&1.uri, System.get_env("NX_STEREO_DEVICE", "")))
+    {:ok, devices: [device | _]} = NxStereo.TestDevices.vulkan()
 
     {left, right} = textured_pair(96, 192, 8)
     k = [200.0, 0.0, 96.0, 0.0, 200.0, 48.0, 0.0, 0.0, 1.0]

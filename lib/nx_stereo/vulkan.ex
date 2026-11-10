@@ -4,10 +4,63 @@ defmodule NxStereo.Vulkan do
   # bindings, buffer sizes and workgroup counts follow the shaders' layouts:
   # features and byte volumes are stored in tiles of 8 rows.
 
+  import NxStereo.Kernels, only: [ceil_div: 2]
+
+  # The shaders by stage: their GLSL source in shaders/ and its macros. The census,
+  # consistency, median and coarse-to-fine shaders serve every disparity range and
+  # band; the matcher's scans and selection exist per disparity range, sgm_band/4's
+  # per band width.
+  @shared [
+    census: {"census_pair", []},
+    consistency: {"consistency_projected", []},
+    median: {"filter", []},
+    shrink: {"shrink", []},
+    band_base: {"band_base", []}
+  ]
+  @by_disparities [
+    cost_forward: {"cost_first", []},
+    cost_reverse: {"cost_scan", ["-DPAIRED=1"]},
+    cost_down: {"cost_line", ["-DSTEP_X=0", "-DSTEP_Y=1"]},
+    cost_up: {"cost_line", ["-DSTEP_X=0", "-DSTEP_Y=-1"]},
+    cost_down_select: {"cost_line", ["-DSTEP_X=0", "-DSTEP_Y=1", "-DSELECT=1"]},
+    cost_down_right: {"cost_line", ["-DSTEP_X=1", "-DSTEP_Y=1", "-DPAIRED=1"]},
+    cost_down_left: {"cost_line", ["-DSTEP_X=-1", "-DSTEP_Y=1"]},
+    cost_up_right: {"cost_line", ["-DSTEP_X=1", "-DSTEP_Y=-1", "-DPAIRED=1"]},
+    cost_up_left: {"cost_line", ["-DSTEP_X=-1", "-DSTEP_Y=-1", "-DPAIRED=1"]},
+    select_8: {"select", []}
+  ]
+  # The band's costs, their column-major copy for the horizontal scans, the scans
+  # ({DX, DY}, two directions with DX2, DY2) and the selection.
+  @by_band [
+    band_cost: {"band_cost", []},
+    band_transpose_costs: {"band_transpose", []},
+    band_scan_forward: {"band_scan", ["-DDX=1", "-DDY=0"]},
+    band_scan_reverse: {"band_scan", ["-DDX=-1", "-DDY=0", "-DPAIRED=1"]},
+    band_scan_down: {"band_scan", ["-DDX=0", "-DDY=1"]},
+    band_scan_down_up: {"band_scan", ["-DDX=0", "-DDY=1", "-DDX2=0", "-DDY2=-1"]},
+    band_scan_down_diagonals: {"band_scan", ["-DDX=1", "-DDY=1", "-DDX2=-1", "-DDY2=1"]},
+    band_scan_up_diagonals: {"band_scan", ["-DDX=1", "-DDY=-1", "-DDX2=-1", "-DDY2=-1"]},
+    band_select: {"band_select", ["-DPATHS=3"]},
+    band_select_8: {"band_select", ["-DPATHS=8"]}
+  ]
+
+  # {key, SPIR-V file name, {source, macros}}
+  @variants for({stage, source} <- @shared, do: {stage, "#{stage}", source}) ++
+              (for disparities <- [64, 128], {stage, {source, flags}} <- @by_disparities do
+                 macros = ["-DDISPARITIES=#{disparities}" | flags]
+                 {{stage, disparities}, "#{stage}_d#{disparities}", {source, macros}}
+               end) ++
+              (for band <- [8, 16, 32, 64], {stage, {source, flags}} <- @by_band do
+                 {{stage, band}, "#{stage}_b#{band}", {source, ["-DBAND=#{band}" | flags]}}
+               end)
+
   @spirv_dir Path.expand("../../priv/spirv", __DIR__)
-  @stages ~w(census cost_forward cost_reverse cost_down cost_up cost_down_select
-              cost_down_right cost_down_left cost_up_right cost_up_left select_8
-              consistency median)a
+  @spirv (for {key, file, _source} <- @variants, into: %{} do
+            path = Path.join(@spirv_dir, "#{file}.spv")
+            @external_resource path
+            {key, File.read!(path)}
+          end)
+
   # The 8-path scans after the horizontal ones, in order: a paired scan reads
   # its partner's volume and writes their sum (each path byte stays below
   # 128), so the selection reads four volumes, not eight.
@@ -20,28 +73,8 @@ defmodule NxStereo.Vulkan do
     {:cost_up_left, :down_up_left, :down}
   ]
 
-  @spirv (for disparities <- [64, 128], stage <- @stages, into: %{} do
-            path = Path.join(@spirv_dir, "#{stage}_d#{disparities}.spv")
-            @external_resource path
-            {{stage, disparities}, File.read!(path)}
-          end)
-
-  @band_stages ~w(band_cost band_transpose_costs band_scan_forward
-                   band_scan_reverse band_scan_down band_scan_down_up band_scan_down_diagonals
-                   band_scan_up_diagonals band_select band_select_8)a
-
-  @band_spirv (for band <- [8, 16, 32, 64], stage <- @band_stages, into: %{} do
-                 path = Path.join(@spirv_dir, "#{stage}_b#{band}.spv")
-                 @external_resource path
-                 {{stage, band}, File.read!(path)}
-               end)
-
-  # sgm_coarse_to_fine/3's steps between its two matchings
-  @coarse_spirv (for stage <- ~w(shrink band_base)a, into: %{} do
-                   path = Path.join(@spirv_dir, "#{stage}.spv")
-                   @external_resource path
-                   {stage, File.read!(path)}
-                 end)
+  # Each shader's SPIR-V file name, GLSL source and macros, for `mix nx_stereo.shaders`.
+  def variants, do: for({_key, file, source} <- @variants, do: {file, source})
 
   # sgm_band/4's scans besides the horizontal ones, by path count: their lines
   # and how many directions each dispatch scans, two writing both volumes in turn.
@@ -54,61 +87,80 @@ defmodule NxStereo.Vulkan do
     ]
   }
 
-  @doc false
   # Both s32 images of {height, width} shrunk 2x, each pixel the rounded mean of a 2x2 block
   def shrink_pipeline(height, width) do
-    if Code.ensure_loaded?(NxIREE.Vulkan.Pipeline) do
-      {half_height, half_width} = {div(height, 2), div(width, 2)}
-      half = Nx.template({half_height, half_width}, :s32)
+    {half_height, half_width} = {div(height, 2), div(width, 2)}
+    half = Nx.template({half_height, half_width}, :s32)
 
-      kernel = %NxIREE.Vulkan.Kernel{
-        spirv: @coarse_spirv.shrink,
-        workgroups: {ceil_div(half_height * half_width, 64), 1, 1},
-        specialization: %{0 => half_width, 1 => half_height}
-      }
+    kernel = %NxIREE.Vulkan.Kernel{
+      spirv: Map.fetch!(@spirv, :shrink),
+      workgroups: {ceil_div(half_height * half_width, 64), 1, 1},
+      specialization: %{0 => half_width, 1 => half_height}
+    }
 
-      %NxIREE.Vulkan.Pipeline{
-        inputs: [:left, :right],
-        stages: [{kernel, [:left, :right], [left_half: half, right_half: half]}],
-        outputs: [:left_half, :right_half]
-      }
-    end
+    %NxIREE.Vulkan.Pipeline{
+      inputs: [:left, :right],
+      stages: [{kernel, [:left, :right], [left_half: half, right_half: half]}],
+      outputs: [:left_half, :right_half]
+    }
   end
 
-  @doc false
   # The s32 band bases of a {height, width} pair from its half-size f32 disparity
   def band_base_pipeline(height, width, margin, max_base) do
-    if Code.ensure_loaded?(NxIREE.Vulkan.Pipeline) do
-      kernel = %NxIREE.Vulkan.Kernel{
-        spirv: @coarse_spirv.band_base,
-        workgroups: {ceil_div(div(height, 2) * div(width, 2), 64), 1, 1},
-        specialization: %{0 => width, 1 => height, 2 => margin, 3 => max_base}
-      }
+    kernel = %NxIREE.Vulkan.Kernel{
+      spirv: Map.fetch!(@spirv, :band_base),
+      workgroups: {ceil_div(div(height, 2) * div(width, 2), 64), 1, 1},
+      specialization: %{0 => width, 1 => height, 2 => margin, 3 => max_base}
+    }
 
-      %NxIREE.Vulkan.Pipeline{
-        inputs: [:coarse],
-        stages: [{kernel, [:coarse], [base: Nx.template({height, width}, :s32)]}],
-        outputs: [:base]
-      }
-    end
+    %NxIREE.Vulkan.Pipeline{
+      inputs: [:coarse],
+      stages: [{kernel, [:coarse], [base: Nx.template({height, width}, :s32)]}],
+      outputs: [:base]
+    }
   end
 
-  def pipeline(config) do
-    if Code.ensure_loaded?(NxIREE.Vulkan.Pipeline), do: build(config)
+  # The census of both images, in tiles of 8 rows.
+  defp census_stage(height, width) do
+    tiled_pixels = width * ceil_div(height, 8) * 8
+
+    kernel = %NxIREE.Vulkan.Kernel{
+      spirv: Map.fetch!(@spirv, :census),
+      workgroups: {ceil_div(width, div(128, 8)), ceil_div(height, 4 * 8), 1},
+      specialization: %{0 => width, 1 => height}
+    }
+
+    {kernel, [:left, :right], [features: Nx.template({tiled_pixels * 4}, :u32)]}
   end
 
-  def band_pipeline(config) do
-    if Code.ensure_loaded?(NxIREE.Vulkan.Pipeline), do: build_band(config)
+  # The left-right check of `:disparity` and `:winners`, then the 3x3 median, into `:output`.
+  defp check_and_median_stages(height, width) do
+    pixels = width * height
+    specialization = %{0 => width, 1 => height}
+
+    kernel =
+      &%NxIREE.Vulkan.Kernel{
+        spirv: Map.fetch!(@spirv, &1),
+        workgroups: &2,
+        specialization: specialization
+      }
+
+    [
+      {kernel.(:consistency, {height, 1, 1}), [:disparity, :winners],
+       [consistent: Nx.template({pixels}, :f32)]},
+      {kernel.(:median, {ceil_div(pixels, 128), 1, 1}), [:consistent],
+       [output: Nx.template({height, width}, :f32)]}
+    ]
   end
 
   # Census in 8-row tiles, the band's costs once,
   # a thread per path line, a lane per word of a pixel's band for the selection;
-  # consistency and median as build/1. The horizontal scans run over a column-major
+  # consistency and median as pipeline/1. The horizontal scans run over a column-major
   # copy of the costs, the reverse one adding the forward one's path bytes, and the
   # selection reads their column-major sum.
-  defp build_band(%{height: height, width: width, disparities: disparities, band: band} = config) do
-    tile = 8
-    tiled_pixels = width * ceil_div(height, tile) * tile
+  def band_pipeline(
+        %{height: height, width: width, disparities: disparities, band: band} = config
+      ) do
     pixels = width * height
     # 6-bit costs, as band_common.glsl packs them.
     cost_words = ceil_div(band * 6, 32)
@@ -131,15 +183,15 @@ defmodule NxStereo.Vulkan do
       volume = Nx.template({div(directions * pixels * band, 4)}, :u32)
 
       {kernel.(
-         Map.fetch!(@band_spirv, {stage, band}),
+         Map.fetch!(@spirv, {stage, band}),
          {directions * ceil_div(lines[kind], 64), 1, 1},
          %{}
        ), inputs, [{stage, volume}]}
     end
 
     horizontal_stages = [
-      {kernel.(Map.fetch!(@band_spirv, {:band_transpose_costs, band}), tiles, %{}),
-       [:costs, :base], [columns: Nx.template({pixels * (cost_words + 1)}, :u32)]},
+      {kernel.(Map.fetch!(@spirv, {:band_transpose_costs, band}), tiles, %{}), [:costs, :base],
+       [columns: Nx.template({pixels * (cost_words + 1)}, :u32)]},
       scan.(:band_scan_forward, :rows, 1, [:params, :columns]),
       scan.(:band_scan_reverse, :rows, 1, [:params, :columns, :band_scan_forward])
     ]
@@ -157,13 +209,9 @@ defmodule NxStereo.Vulkan do
       inputs: [:left, :right, :params, :base],
       stages:
         [
+          census_stage(height, width),
           {kernel.(
-             Map.fetch!(@spirv, {:census, 128}),
-             {ceil_div(width, div(128, tile)), ceil_div(height, 4 * tile), 1},
-             %{}
-           ), [:left, :right], [features: Nx.template({tiled_pixels * 4}, :u32)]},
-          {kernel.(
-             Map.fetch!(@band_spirv, {:band_cost, band}),
+             Map.fetch!(@spirv, {:band_cost, band}),
              {ceil_div(width, 64), ceil_div(height, 4), 1},
              %{2 => disparities}
            ), [:features, :base], [costs: Nx.template({pixels * cost_words}, :u32)]}
@@ -171,23 +219,17 @@ defmodule NxStereo.Vulkan do
           scan_stages ++
           [
             {kernel.(
-               Map.fetch!(@band_spirv, {select, band}),
+               Map.fetch!(@spirv, {select, band}),
                {ceil_div(pixels * div(band, 4), 64), 1, 1},
-               %{
-                 2 => disparities
-               }
+               %{2 => disparities}
              ), [:params, :base, :band_scan_reverse | Keyword.keys(other_scans)],
-             [disparity: map, winners: Nx.template({pixels}, :u32)]},
-            {kernel.(Map.fetch!(@spirv, {:consistency, 128}), {height, 1, 1}, %{}),
-             [:disparity, :winners], [consistent: map]},
-            {kernel.(Map.fetch!(@spirv, {:median, 128}), {ceil_div(pixels, 128), 1, 1}, %{}),
-             [:consistent], [output: Nx.template({height, width}, :f32)]}
-          ],
+             [disparity: map, winners: Nx.template({pixels}, :u32)]}
+          ] ++ check_and_median_stages(height, width),
       outputs: [:output]
     }
   end
 
-  defp build(%{height: height, width: width, disparities: disparities} = config) do
+  def pipeline(%{height: height, width: width, disparities: disparities} = config) do
     tile = 8
     tiled_pixels = width * ceil_div(height, tile) * tile
     pixels = width * height
@@ -233,22 +275,14 @@ defmodule NxStereo.Vulkan do
       inputs: [:left, :right, :params],
       stages:
         [
-          {kernel.(:census, {ceil_div(width, div(128, tile)), ceil_div(height, 4 * tile), 1}),
-           [:left, :right], [features: Nx.template({tiled_pixels * 4}, :u32)]},
+          census_stage(height, width),
           {kernel.(:cost_forward, {rows, 1, 1}), [:params, :features],
            [forward: volume, costs: volume]},
           {kernel.(:cost_reverse, {rows, 1, 1}), [:params, :costs, :forward],
            [forward_reverse: volume]}
         ] ++
-          aggregation ++
-          [
-            {kernel.(:consistency, {height, 1, 1}), [:disparity, :winners], [consistent: map]},
-            {kernel.(:median, {ceil_div(pixels, 128), 1, 1}), [:consistent],
-             [output: Nx.template({height, width}, :f32)]}
-          ],
+          aggregation ++ check_and_median_stages(height, width),
       outputs: [:output]
     }
   end
-
-  defp ceil_div(a, b), do: div(a + b - 1, b)
 end

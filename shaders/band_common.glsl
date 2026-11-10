@@ -10,7 +10,4 @@ uint cost_at(uint words[COST_WORDS], int k) {
   uint low = words[w] >> shift;
   return (shift > 26 ? low | (words[w + 1] << (32 - shift)) : low) & 63u;
 }
-// The census features are tiled as census_pair.comp writes them.
-int feature_index(int x, int y) {
-  return ((y / FEATURE_TILE) * WIDTH + x) * FEATURE_TILE + y % FEATURE_TILE;
-}
+#include "features.glsl"

@@ -1,17 +1,15 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 // Copyright 2016 Fixstars Corporation
 // SPDX-License-Identifier: Apache-2.0
 // Vulkan adaptation of libSGM's census transform (9x7 window).
 layout(local_size_x = 128) in;
-// Image size is a specialization constant; the disparity
-// range and lane layout stay compile-time macros.
 layout(constant_id = 0) const int WIDTH = 640;
 layout(constant_id = 1) const int HEIGHT = 480;
+#include "features.glsl"
 layout(set = 0, binding = 0) readonly buffer Left { int left_image[]; };
 layout(set = 0, binding = 1) readonly buffer Right { int right_image[]; };
 #define FEATURE_PAIR uvec4
-// Left and right features of a pixel share one element, stored in tiles of
-// FEATURE_TILE consecutive rows per column, matching the byte volumes.
 layout(set = 0, binding = 2) writeonly buffer Features { FEATURE_PAIR features[]; };
 // A workgroup covers COLUMNS columns of GROUP_ROWS rows; a thread computes
 // QUAD consecutive pixels of a row, so each row of their shared window is
@@ -21,7 +19,6 @@ layout(set = 0, binding = 2) writeonly buffer Features { FEATURE_PAIR features[]
 #define GROUP_ROWS (128 * QUAD / COLUMNS)
 #define WINDOW_COLUMNS (COLUMNS + 8)
 #define WINDOW_ROWS (GROUP_ROWS + 6)
-#define STRIDE WINDOW_COLUMNS
 // One shared word holds both images of a pixel in 16-bit lanes, each offset by
 // 0x100. Subtracting the unoffset centre word, lowered by one level and
 // clamped at zero in each lane, then yields, without borrows between lanes,
@@ -30,7 +27,7 @@ layout(set = 0, binding = 2) writeonly buffer Features { FEATURE_PAIR features[]
 // Census bits and are inverted once at the end.
 #define LANE_OFFSET 0x01000100u
 #define COMPARE_MASK 0x01000100u
-shared uint rows[WINDOW_ROWS * STRIDE];
+shared uint rows[WINDOW_ROWS * WINDOW_COLUMNS];
 uint load_pair(int x, int y) {
   int pixel = clamp(y, 0, HEIGHT - 1) * WIDTH + clamp(x, 0, WIDTH - 1);
   return (uint(left_image[pixel]) | (uint(right_image[pixel]) << 16)) + LANE_OFFSET;
@@ -51,7 +48,7 @@ void main() {
   int y0 = int(gl_WorkGroupID.y) * GROUP_ROWS;
   for (int i = tid; i < WINDOW_ROWS * WINDOW_COLUMNS; i += 128) {
     int r = i / WINDOW_COLUMNS, c = i % WINDOW_COLUMNS;
-    rows[r * STRIDE + c] = load_pair(x0 - 4 + c, y0 - 3 + r);
+    rows[r * WINDOW_COLUMNS + c] = load_pair(x0 - 4 + c, y0 - 3 + r);
   }
   barrier();
   int row = tid / (COLUMNS / QUAD);
@@ -61,7 +58,7 @@ void main() {
 
   uint a[QUAD];
   for (int p = 0; p < QUAD; ++p) {
-    uint c = rows[(row + 3) * STRIDE + first + p + 4] - LANE_OFFSET;
+    uint c = rows[(row + 3) * WINDOW_COLUMNS + first + p + 4] - LANE_OFFSET;
     a[p] = (max(c & 0xffffu, 1u) - 1u) | ((max(c >> 16, 1u) - 1u) << 16);
   }
   uint chunk[QUAD][3];
@@ -71,7 +68,7 @@ void main() {
   for (int k = 0; k < 6; ++k) {
     int dy = k < 3 ? k - 3 : k - 2;
     uint words[QUAD + 8];
-    for (int w = 0; w < QUAD + 8; ++w) words[w] = rows[(row + 3 + dy) * STRIDE + first + w];
+    for (int w = 0; w < QUAD + 8; ++w) words[w] = rows[(row + 3 + dy) * WINDOW_COLUMNS + first + w];
     for (int p = 0; p < QUAD; ++p) {
       uint bits = row_bits(words, p, a[p]);
       int target = 2 - k / 2;
@@ -82,8 +79,7 @@ void main() {
     int x = x0 + first + p;
     if (x >= WIDTH) break;
     uint chunk0 = ~chunk[p][0], chunk1 = ~chunk[p][1], chunk2 = ~chunk[p][2];
-    int index = ((y / FEATURE_TILE) * WIDTH + x) * FEATURE_TILE + y % FEATURE_TILE;
-    features[index] = uvec4((chunk0 & 0xffffu) | (chunk1 << 16), chunk2 & 0xffffu,
+    features[feature_index(x, y)] = uvec4((chunk0 & 0xffffu) | (chunk1 << 16), chunk2 & 0xffffu,
                             (chunk0 >> 16) | (chunk1 & 0xffff0000u), chunk2 >> 16);
   }
 }

@@ -102,9 +102,11 @@ own implements `NxStereo.Stage` and joins the list like the others.
 | `NxSegment` with Nx alone | a CPU, in Elixir | checking results; far too slow for video |
 
 A stage with no native implementation, or `Stage.Disparity` with
-`search: "coarse_to_fine"`, runs in an `NxSegment`. A segment keeps two
-pairs in flight: send one with `send_request/2` while the previous one's
-outputs are collected (`NxStereo.Segment`).
+`search: "coarse_to_fine"`, runs in an `NxSegment`: `NativeSegment.build/3`
+refuses it. To overlap pairs, send one with `send_request/2` while the
+previous one's outputs are collected (`NxStereo.Segment`): a backend's
+`depth/0` says how many pairs it keeps in flight, one on a GPU, two in
+`stereo_match`.
 
 ### How the implementations are kept equal
 
@@ -422,10 +424,12 @@ words, or `s32` ones, each a variant of the shader.
   * The penalties P1 and P2 and the uniqueness ratio are a `{3}` `f32`
     input buffer (`params.glsl`), so they change between frames without a
     new pipeline.
-  * Lane layout, tiling, band width, path count and scan direction are
+  * Disparity range, band width, path count and scan direction are
     compile-time macros: each combination is its own binary, named after the
     stage and its disparity range (`_d64`, `_d128`) or band width (`_b8` to
-    `_b64`).
+    `_b64`). The census, consistency and median shaders serve them all.
+    `NxStereo.Vulkan` and `NxStereo.Kernels` list every variant, which
+    `mix nx_stereo.shaders` compiles.
 
 ### SPIR-V binaries
 

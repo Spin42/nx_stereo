@@ -4,7 +4,9 @@
 // written so every candidate is formed once: the clamped own value, and the
 // cheaper of the two neighbours plus P1. Lane-boundary neighbours arrive
 // through relative shuffles; a missing neighbour contributes P2 - P1 so that
-// adding P1 reproduces the P2 clamp exactly.
+// adding P1 reproduces the P2 clamp exactly. Image size is a specialization
+// constant; the disparity range and lane layout are compile-time macros.
+#define BLOCK 8
 #define LANES (DISPARITIES / BLOCK)
 // A workgroup scans LINES lines, LANES * LINES threads: 64 at 64 disparities,
 // which Adreno GPUs run as narrower waves than 128.

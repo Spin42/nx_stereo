@@ -6,8 +6,6 @@
 // OpenCV SGBM3Way's winner-projected pseudo right map and consistency rule.
 // See OPENCV-LICENSE. Row scatter mutates only workgroup-local storage.
 layout(local_size_x = 128) in;
-// Image size is a specialization constant; the disparity
-// range and lane layout stay compile-time macros.
 layout(constant_id = 0) const int WIDTH = 640;
 layout(constant_id = 1) const int HEIGHT = 480;
 layout(set = 0, binding = 0) readonly buffer Left { float left_disparity[]; };
@@ -15,7 +13,7 @@ layout(set = 0, binding = 1) readonly buffer Winners { uint winners[]; };
 layout(set = 0, binding = 2) writeonly buffer Output { float consistent[]; };
 // Sized by the row, so as many workgroups fit on the GPU as its rows allow.
 shared uint right_winners[WIDTH];
-uint projected(int rx, int y) {
+uint projected(int rx) {
   return rx >= 0 && rx < WIDTH ? right_winners[rx] : 0xffffffffu;
 }
 bool disagrees(uint match, int rx, int d) {
@@ -25,8 +23,8 @@ void check_pixel(int pixel) {
   int x = pixel % WIDTH, y = pixel / WIDTH;
   float value = left_disparity[pixel];
   int lo = int(floor(value)), hi = int(ceil(value));
-  uint lower = projected(x-lo,y);
-  uint upper = lo == hi ? lower : projected(x-hi,y);
+  uint lower = projected(x-lo);
+  uint upper = lo == hi ? lower : projected(x-hi);
   bool rejected = disagrees(lower,x-lo,lo) && disagrees(upper,x-hi,hi);
   consistent[pixel] = value >= 0.0 && !rejected ? value : -1.0;
 }

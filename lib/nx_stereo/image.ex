@@ -496,9 +496,10 @@ defmodule NxStereo.Image do
     |> elem(div(kernel_size * kernel_size, 2))
   end
 
+  @doc false
   # `image` moved by `dy` rows and `dx` columns, the edge repeated: slices
   # rather than an axis `take`, which NxIREE cannot compile.
-  defp shift(image, dy, dx), do: image |> shift_axis(dy, 0) |> shift_axis(dx, 1)
+  def shift(image, dy, dx), do: image |> shift_axis(dy, 0) |> shift_axis(dx, 1)
 
   defp shift_axis(image, 0, _axis), do: image
 

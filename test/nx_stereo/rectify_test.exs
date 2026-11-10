@@ -182,15 +182,7 @@ defmodule NxStereo.RectifyTest do
   describe "on Vulkan through NxIREE" do
     @describetag :vulkan
 
-    setup do
-      {:ok, devices} = NxIREE.list_devices("vulkan")
-
-      devices =
-        Enum.filter(devices, &String.contains?(&1.uri, System.get_env("NX_STEREO_DEVICE", "")))
-
-      assert devices != []
-      {:ok, devices: devices}
-    end
+    setup do: NxStereo.TestDevices.vulkan()
 
     test "matches the reference within one grey level", %{devices: devices} do
       image = random_image(270, 480, 3)
