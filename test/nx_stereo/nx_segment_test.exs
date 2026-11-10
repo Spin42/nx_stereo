@@ -101,21 +101,22 @@ defmodule NxStereo.NxSegmentTest do
       do: Process.sleep(:infinity)
   end
 
-  # Compiles to a function whose `:left` output is an UnreadableBuffer, read as its `:read` says.
+  # Compiles to a function whose published bundle, the `:left` image's 64 words, is an
+  # UnreadableBuffer read as its `:read` says.
   defmodule UnreadableDevice do
     @behaviour Nx.Defn.Compiler
 
     def __jit__(_key, _vars, _fun, _args, _opts), do: raise("only compiled")
 
     def __compile__(_key, _vars, _fun, opts) do
-      left = %Nx.Tensor{
+      published = %Nx.Tensor{
         data: %UnreadableBuffer{read: opts[:read]},
-        shape: {2, 4},
-        type: {:u, 8},
-        names: [nil, nil]
+        shape: {64},
+        type: {:u, 32},
+        names: [nil]
       }
 
-      fn _args -> [%{left: left}] end
+      fn _args -> [%{published: published}] end
     end
 
     def __partitions_options__(opts), do: [opts]
@@ -159,12 +160,29 @@ defmodule NxStereo.NxSegmentTest do
     end
   end
 
-  test "runs consecutive steps as one function, returning every tensor but the frames" do
+  test "runs consecutive steps as one function, returning the tensors they fill" do
     {:ok, segment} = build([AddOne, Double])
     {:ok, outputs, _segment} = run(entries([0, 1, 2, 3, 4, 5, 6, 7]), segment)
 
     assert Map.keys(outputs) == [:left]
     assert Nx.to_list(outputs.left) == [[2, 4, 6, 8], [10, 12, 14, 16]]
+  end
+
+  # Reads the left image, an entry, and fills a tensor of its own.
+  defmodule Sum do
+    def requires, do: [:left]
+    def provides, do: [:sum]
+    def step(tensors, _params, _state), do: Map.put(tensors, :sum, Nx.sum(tensors.left))
+  end
+
+  test "downloads only what its stages fill, not the entries it was given" do
+    {:ok, segment} = NxSegment.build(members([Sum]), geometry(), [])
+    left = Nx.iota({2, 4}, type: :u8)
+    {:ok, outputs, segment, _done} = reply(%{left: left}, segment)
+    {:ok, downloaded} = NxSegment.collect(outputs, segment, 5_000)
+
+    assert Map.keys(downloaded) == [:sum]
+    assert {:ok, %{left: ^left, sum: _}, _segment} = run(%{left: left}, segment)
   end
 
   test "passes each stage's params as inputs, and reload replaces them" do
@@ -269,9 +287,7 @@ defmodule NxStereo.NxSegmentTest do
   end
 
   test "takes its defn options among its build options, and refuses one it does not know" do
-    assert {:ok, segment} = build([AddOne], defn_options: [compiler: EXLA])
-    assert NxSegment.compute(segment) == %{runs_on: :cpu, implementation: :nx, backend: :exla}
-
+    assert {:ok, _segment} = build([AddOne], defn_options: [compiler: EXLA])
     assert build([AddOne], compiler: EXLA) == {:error, "unknown build options [:compiler]"}
   end
 

@@ -16,7 +16,7 @@ defmodule NxStereo.Stage.Decode do
   @impl NxStereo.Stage
   def init(settings, geometry) do
     with {:ok, _none} <- NxStereo.Stage.settings(settings, []),
-         do: {:ok, %{size: {geometry.height, geometry.width}}}
+         do: {:ok, %{size: NxStereo.Stage.size(geometry)}}
   end
 
   @impl NxStereo.Stage

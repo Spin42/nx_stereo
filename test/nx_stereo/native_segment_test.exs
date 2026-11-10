@@ -91,7 +91,7 @@ defmodule NxStereo.NativeSegmentTest do
                Nx.to_binary(disparity())
   end
 
-  test "returns the Port's outputs and each member's time, and a new state from the next pair" do
+  test "returns the Port's outputs and each member's time; a new state changes its params, not its settings" do
     segment = segment(matcher(outputs_reply([7], "scaled")))
     {:ok, request_id} = NativeSegment.send_request(%{disparity: disparity()}, segment)
 
@@ -184,10 +184,40 @@ defmodule NxStereo.NativeSegmentTest do
     refute NativeSegment.accepts?(Scale, nil, :nx)
     refute NativeSegment.accepts?(NxOnly, nil, :native)
 
-    for stage <- [Stage.Rectification, Stage.Disparity, Stage.Depth, Stage.PointCloud],
-        do: assert(NativeSegment.accepts?(stage, nil, :native))
+    geometry = %{
+      width: 8,
+      height: 2,
+      frame_width: 8,
+      frame_height: 2,
+      focal_length_px: 100.0,
+      baseline_m: 0.1,
+      principal_point: {4.0, 1.0}
+    }
+
+    stages = [Stage.Rectification, Stage.Disparity, Stage.Depth, Stage.PointCloud]
+    {:ok, members} = Segment.members(stages, geometry)
+
+    for member <- members,
+        do: assert(NativeSegment.accepts?(member.module, member.state, :native))
 
     refute NativeSegment.accepts?(Stage.Decode, nil, :native)
+  end
+
+  test "takes neither a stage without a native implementation nor one that asks for Nx" do
+    geometry = %{width: 8, height: 2, frame_width: 8, frame_height: 2}
+
+    {:ok, coarse} =
+      Stage.Disparity.init([search: "coarse_to_fine", num_disparities: 128], geometry)
+
+    refute NativeSegment.accepts?(Stage.Disparity, coarse, :native)
+
+    assert NativeSegment.build([%{module: Stage.Decode, name: :decode, state: nil}], geometry, []) ==
+             {:error, "NxStereo.Stage.Decode has no native implementation"}
+
+    member = %{module: Stage.Disparity, name: :disparity, state: coarse}
+
+    assert NativeSegment.build([member], geometry, []) ==
+             {:error, "NxStereo.Stage.Disparity is computed in Nx, as its settings ask"}
   end
 
   test "runs on the CPU, two pairs at a time, and refuses a build option it does not know" do

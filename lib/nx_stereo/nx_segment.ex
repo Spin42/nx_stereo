@@ -5,7 +5,7 @@ defmodule NxStereo.NxSegment do
 
   The function takes the pair's entries (`NxStereo.Segment.entry_fields/1`,
   camera frames as `u8` images) and each stage's `params/2`, and returns
-  every tensor but the frames and those the stages keep on the device
+  the tensors its stages fill, but those they keep on the device
   (`c:NxStereo.Stage.device_only/0`). Outputs are published as one `u32`
   tensor and come back to the CPU in one download, since each device
   transfer has a fixed cost; `collect/3` unbundles them.
@@ -15,7 +15,7 @@ defmodule NxStereo.NxSegment do
   `byte_storage: false`, for a GPU without 8-bit storage, moves frames
   and images as `u32` words of four pixels (`NxStereo.Packing`); and
   `cache_only: true`, with `NxIREE.Compiler`, only writes the module to
-  the module cache (`compile/3`). Since calibration values are inputs, a
+  the module cache. Since calibration values are inputs, a
   calibration reload (`reload/3`) needs no new function.
 
   The values the stages carry from one pair to the next
@@ -52,7 +52,7 @@ defmodule NxStereo.NxSegment do
 
   @doc """
   Compiles `members` for `geometry`, with `opts`: `:defn_options` (`[]`,
-  Nx's own defaults), how; see `compile/3`.
+  Nx's own defaults), how; see the module documentation.
   """
   @impl NxStereo.Segment
   @spec build([Segment.member()], Stage.geometry(), keyword()) ::
@@ -110,7 +110,7 @@ defmodule NxStereo.NxSegment do
     |> Nx.Defn.debug_expr()
     |> apply([entry_templates, Nx.to_template(params)])
     |> Enum.reject(fn {key, _tensor} ->
-      match?({:carry, _index, _name}, key) or key in device_only
+      carry?(key) or key in device_only
     end)
     |> Enum.sort_by(&elem(&1, 0))
     |> Enum.map_reduce(0, fn {key, tensor}, offset ->
@@ -130,8 +130,7 @@ defmodule NxStereo.NxSegment do
     div(words + @section_words - 1, @section_words) * @section_words
   end
 
-  defp bundle(results, []),
-    do: Map.filter(results, fn {key, _} -> match?({:carry, _, _}, key) end)
+  defp bundle(results, []), do: Map.filter(results, fn {key, _} -> carry?(key) end)
 
   defp bundle(results, layout) do
     words =
@@ -141,7 +140,7 @@ defmodule NxStereo.NxSegment do
       end)
 
     results
-    |> Map.filter(fn {key, _tensor} -> match?({:carry, _index, _name}, key) end)
+    |> Map.filter(fn {key, _tensor} -> carry?(key) end)
     |> Map.put(:published, Nx.concatenate(words))
   end
 
@@ -198,35 +197,25 @@ defmodule NxStereo.NxSegment do
   def accepts?(module, _state, compute),
     do: compute == :nx and Code.ensure_loaded?(module) and function_exported?(module, :step, 3)
 
-  @doc """
-  Compiles `function` for `templates` with `defn_options`, an
-  `:iree_module_cache` of `{app, path}` being a directory in that app.
-  A module missing from the cache of a compiler that cannot compile is
-  an error that starts with "no compiled module". With `cache_only:
-  true` and `NxIREE.Compiler`, the module is only written to the module
-  cache, for a device of another kind than the host: the function
-  returned raises.
-  """
-  @spec compile(function(), [term()], keyword()) :: {:ok, function()} | {:error, String.t()}
-  def compile(function, templates, defn_options) do
+  # Compiles `function` for `templates` with `defn_options`, an `:iree_module_cache` of
+  # `{app, path}` being a directory in that app. A module missing from the cache of a
+  # compiler that cannot compile is an error that starts with "no compiled module". With
+  # `cache_only: true` and `NxIREE.Compiler`, the module is only written to the module
+  # cache, for a device of another kind than the host: the function returned raises.
+  defp compile(function, templates, defn_options) do
     {cache_only?, defn_options} = Keyword.pop(defn_options, :cache_only, false)
     defn_options = resolve_module_cache(defn_options)
 
     if cache_only? do
       {compiler, defn_options} = Keyword.pop(defn_options, :compiler)
       {:ok, _module} = compiler.to_bytecode(function, templates, defn_options)
-      {:ok, cache_only_function(length(templates))}
+      {:ok, fn _entries, _params -> raise "compiled for the module cache only" end}
     else
       {:ok, Nx.Defn.compile(function, templates, defn_options)}
     end
   rescue
     error -> {:error, compile_error_message(error)}
   end
-
-  defp cache_only_function(1), do: fn _input -> raise "compiled for the module cache only" end
-
-  defp cache_only_function(2),
-    do: fn _input, _params -> raise "compiled for the module cache only" end
 
   @doc """
   The segment with `members` re-initialised for a new `geometry` of the
@@ -255,11 +244,7 @@ defmodule NxStereo.NxSegment do
     members = List.update_at(members, index, &%{&1 | state: state})
     member = Enum.at(members, index)
 
-    inputs =
-      member.module
-      |> Stage.params(member.state, segment.geometry)
-      |> Map.new(fn {key, value} -> {key, to_input(value)} end)
-      |> place(segment.placement)
+    inputs = member |> member_params(segment.geometry) |> place(segment.placement)
 
     carried = Map.take(segment.params[index], segment.carried[index])
 
@@ -308,10 +293,7 @@ defmodule NxStereo.NxSegment do
   # The outputs stay on the device; the segment carries the stages' values to the next pair.
   defp dispatch(entry, segment) do
     with {:ok, results} <- call(segment, place(entry, segment.placement)) do
-      {carry, outputs} =
-        results
-        |> Map.drop(device_only(segment.members))
-        |> Map.split_with(fn {key, _tensor} -> match?({:carry, _index, _name}, key) end)
+      {carry, outputs} = Map.split_with(results, fn {key, _tensor} -> carry?(key) end)
 
       params =
         Enum.reduce(carry, segment.params, fn {{:carry, index, name}, tensor}, params ->
@@ -385,14 +367,16 @@ defmodule NxStereo.NxSegment do
     end
   end
 
+  # A segment that publishes nothing has no bundle.
   defp download(outputs, layout) do
-    {bundle, loose} = Map.pop(outputs, :published)
-
     unbundled =
-      if bundle, do: unbundle(Nx.to_binary(Nx.backend_transfer(bundle)), layout), else: []
+      case Map.fetch(outputs, :published) do
+        {:ok, bundle} -> unbundle(Nx.to_binary(Nx.backend_transfer(bundle)), layout)
+        :error -> []
+      end
 
     {:ok,
-     (Enum.map(loose, fn {key, tensor} -> {key, Nx.backend_transfer(tensor)} end) ++ unbundled)
+     unbundled
      |> Map.new(fn
        {{:packed, key}, tensor} -> {key, Packing.unpack_download(tensor)}
        entry -> entry
@@ -434,7 +418,11 @@ defmodule NxStereo.NxSegment do
     end)
   end
 
+  # The stages' outputs: an entry no member provides is the caller's already.
   defp run_steps(members, tensors, params) do
+    provided = Enum.flat_map(members, & &1.module.provides())
+    passed_through = Map.keys(tensors) -- provided
+
     members
     |> Enum.with_index()
     |> Enum.reduce(tensors, fn {member, index}, tensors ->
@@ -445,20 +433,15 @@ defmodule NxStereo.NxSegment do
         entry -> entry
       end)
     end)
-    |> Map.drop(Segment.frame_fields())
+    |> Map.drop(Segment.frame_fields() ++ passed_through)
   end
 
   defp params(members, geometry) do
     members
     |> Enum.with_index()
     |> Map.new(fn {member, index} ->
-      values =
-        Map.merge(
-          Stage.params(member.module, member.state, geometry),
-          Stage.carry(member.module, member.state, geometry)
-        )
-
-      {index, Map.new(values, fn {key, value} -> {key, to_input(value)} end)}
+      carry = Stage.carry(member.module, member.state, geometry)
+      {index, Map.merge(member_params(member, geometry), carry)}
     end)
   end
 
@@ -472,6 +455,16 @@ defmodule NxStereo.NxSegment do
   end
 
   defp device_only(members), do: Enum.flat_map(members, &Stage.device_only(&1.module))
+
+  defp carry?({:carry, _index, _name}), do: true
+  defp carry?(_key), do: false
+
+  # A member's params, numbers as f32 tensors.
+  defp member_params(member, geometry) do
+    member.module
+    |> Stage.params(member.state, geometry)
+    |> Map.new(fn {key, value} -> {key, to_input(value)} end)
+  end
 
   defp to_input(value) when is_number(value), do: Nx.tensor(value, type: :f32)
   defp to_input(value), do: value
@@ -507,9 +500,8 @@ defmodule NxStereo.NxSegment do
   defp exla_device(client) when client in [:cuda, :rocm], do: :gpu
   defp exla_device(_client), do: :cpu
 
-  @doc "`defn_options` with an `:iree_module_cache` of `{app, path}` resolved to that app's directory."
-  @spec resolve_module_cache(keyword()) :: keyword()
-  def resolve_module_cache(defn_options) do
+  # `defn_options` with an `:iree_module_cache` of `{app, path}` resolved to that app's directory.
+  defp resolve_module_cache(defn_options) do
     case Keyword.fetch(defn_options, :iree_module_cache) do
       {:ok, {app, path}} ->
         Keyword.put(defn_options, :iree_module_cache, Application.app_dir(app, path))

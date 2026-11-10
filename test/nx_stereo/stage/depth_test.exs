@@ -17,6 +17,6 @@ defmodule NxStereo.Stage.DepthTest do
 
   test "takes no settings" do
     assert {:error, message} = Depth.init([scale: 2], @geometry)
-    assert message =~ "no settings"
+    assert message =~ "unknown settings [:scale]"
   end
 end

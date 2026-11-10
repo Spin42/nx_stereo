@@ -75,9 +75,10 @@ defmodule NxStereo.SegmentTest do
              [:left_frame, :right_frame, :disparity]
   end
 
-  test "cannot take a tensor no stage of a segment fills" do
+  test "cannot take as an entry a tensor no stage before it fills" do
     assert Segment.entry_specs(members([ReadsDepth]), @geometry) ==
-             {:error, "a segment cannot read :depth from a CPU stage"}
+             {:error,
+              "no stage before it provides :depth, and a segment cannot take it as an entry"}
   end
 
   test "takes entries as tensors of their spec, or says why it cannot" do
@@ -132,7 +133,7 @@ defmodule NxStereo.SegmentTest do
     assert depth == %{module: NxStereo.Stage.Depth, name: NxStereo.Stage.Depth, state: nil}
     assert filter.state.min_support == 4
 
-    assert {:error, "NxStereo.Stage.Depth: Depth takes no settings, got [:scale]"} =
+    assert {:error, "NxStereo.Stage.Depth: unknown settings [:scale]"} =
              Segment.members([{NxStereo.Stage.Depth, scale: 2}], geometry)
   end
 end

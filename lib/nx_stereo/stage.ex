@@ -82,7 +82,7 @@ defmodule NxStereo.Stage do
 
   @doc """
   Where the stage asks to be computed: in Nx (`:nx`), natively
-  (`:native`), or wherever the pipeline computes (`nil`).
+  (`:native`), or by whichever backend runs it (`nil`).
   """
   @callback compute(state()) :: :nx | :native | nil
 
@@ -137,6 +137,10 @@ defmodule NxStereo.Stage do
     if function_exported?(module, :device_only, 0), do: module.device_only(), else: []
   end
 
+  @doc "The working size of `geometry`, as `{height, width}`."
+  @spec size(geometry()) :: {pos_integer(), pos_integer()}
+  def size(geometry), do: {geometry.height, geometry.width}
+
   @doc "The native implementation `module` declares, or `nil`; see `c:native_kind/0`."
   @spec native_kind(module()) :: String.t() | nil
   def native_kind(module) do
@@ -147,7 +151,7 @@ defmodule NxStereo.Stage do
   @doc "The constants `module` shares with its native implementation; see `c:native_constants/0`."
   @spec native_constants(module()) :: %{atom() => number()}
   def native_constants(module) do
-    if Code.ensure_loaded?(module) and function_exported?(module, :native_constants, 0),
+    if function_exported?(module, :native_constants, 0),
       do: module.native_constants(),
       else: %{}
   end
