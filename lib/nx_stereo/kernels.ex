@@ -5,7 +5,7 @@ defmodule NxStereo.Kernels do
   # words only; everywhere else it runs `default`, the stage's Nx code. Without
   # NxIREE, `default` runs directly.
 
-  @spirv_dir Path.expand("../../priv/spirv", __DIR__)
+  @spirv_dir Path.expand("../../shaders/spirv", __DIR__)
 
   # The values the kernels compile in; other values run the Nx code.
   @despeckle_radius 3

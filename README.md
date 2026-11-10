@@ -96,7 +96,7 @@ own implements `NxStereo.Stage` and joins the list like the others.
 
 | Backend | Runs on | Choose it for |
 | --- | --- | --- |
-| `NxSegment` with `NxIREE.Compiler` for Vulkan | a GPU, as the shaders in `priv/spirv` | a board with a Vulkan GPU: 30 pairs a second at 728x544 over 128 disparities on an Arduino VENTUNO Q's Adreno 623 |
+| `NxSegment` with `NxIREE.Compiler` for Vulkan | a GPU, as the shaders in `shaders/spirv` | a board with a Vulkan GPU: 30 pairs a second at 728x544 over 128 disparities on an Arduino VENTUNO Q's Adreno 623 |
 | `NativeSegment` | every core of a CPU, in `stereo_match` | a board without a usable GPU: 16 to 21 pairs a second at 480x270 over 64 disparities on a Raspberry Pi 5 |
 | `NxSegment` with EXLA | a CPU or CUDA GPU, as XLA code | a workstation, and the reference the others are checked against |
 | `NxSegment` with Nx alone | a CPU, in Elixir | checking results; far too slow for video |
@@ -212,7 +212,7 @@ compiler; the native backend is the one way to run the stages outside Nx:
 | --- | --- | --- |
 | Nx alone (`Nx.Defn.Evaluator`) | CPU, in Elixir; correct but far too slow for video | `nx` |
 | `EXLA` | CPU, or CUDA GPUs, as XLA code | `exla` |
-| `NxIREE.Compiler` for Vulkan | Vulkan GPUs, as the shaders in `priv/spirv` | `nx_iree`, plus `exla` where it compiles |
+| `NxIREE.Compiler` for Vulkan | Vulkan GPUs, as the shaders in `shaders/spirv` | `nx_iree`, plus `exla` where it compiles |
 | `NxStereo.NativeSegment` | CPU cores, in `stereo_match` | `cargo` where nx_stereo compiles |
 
 Only `NxIREE.Compiler` uses the shaders; every other compiler or backend runs
@@ -249,7 +249,7 @@ compiled: after adding `exla` to a project where `nx_iree` is already built,
 run `mix deps.compile nx_iree --force`, or compiling for Vulkan fails.
 
 Installing `nx_stereo` needs no shader compiler: the SPIR-V binaries in
-`priv/spirv` are committed (see [SPIR-V binaries](#spir-v-binaries)).
+`shaders/spirv` are committed (see [SPIR-V binaries](#spir-v-binaries)).
 
 The native backend is built when nx_stereo compiles, if `cargo` is
 installed: `stereo_match`, from `native/`, goes into the app's `priv`.
@@ -341,7 +341,7 @@ for both, and for cross-compiling with Nerves.
 Each matching function wraps its Nx implementation in an `Nx.block`. When
 `NxIREE.Compiler` compiles for Vulkan, the block becomes an
 `NxIREE.Vulkan.Pipeline` (built in `NxStereo.Vulkan`): a sequence of compute
-dispatches, each a SPIR-V shader from `priv/spirv`, with the buffers between
+dispatches, each a SPIR-V shader from `shaders/spirv`, with the buffers between
 them kept on the GPU. Every other compiler runs the block's Nx
 implementation, which is also the reference the shaders are tested against.
 
@@ -435,10 +435,11 @@ words, or `s32` ones, each a variant of the shader.
 
 ### SPIR-V binaries
 
-The binaries in `priv/spirv` are required: `NxStereo.Vulkan` and
-`NxStereo.Kernels` read them when they compile, whether or not `nx_iree` is
-installed, and nx_stereo does not compile without them. They are committed so that installing nx_stereo needs
-no shader compiler. After changing a shader in `shaders/`, regenerate them
+The binaries in `shaders/spirv` are required: `NxStereo.Vulkan` and
+`NxStereo.Kernels` embed them when they compile, whether or not `nx_iree`
+is installed, so nx_stereo does not compile without them and a release
+does not carry them. They are committed so that installing nx_stereo
+needs no shader compiler. After changing a shader in `shaders/`, regenerate them
 with `glslangValidator` installed:
 
 ```shell

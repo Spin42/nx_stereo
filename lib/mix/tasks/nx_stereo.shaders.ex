@@ -1,8 +1,8 @@
 defmodule Mix.Tasks.NxStereo.Shaders do
-  @shortdoc "Compiles the Vulkan shaders into priv/spirv"
+  @shortdoc "Compiles the Vulkan shaders into shaders/spirv"
   @moduledoc """
   Compiles the GLSL sources in `shaders/` into the SPIR-V binaries shipped in
-  `priv/spirv`: each variant `NxStereo.Vulkan` and `NxStereo.Kernels` list,
+  `shaders/spirv`: each variant `NxStereo.Vulkan` and `NxStereo.Kernels` list,
   a source with its macros. Requires `glslangValidator`; the binaries are
   committed, so users never run it.
 
@@ -16,10 +16,10 @@ defmodule Mix.Tasks.NxStereo.Shaders do
     compiler =
       System.find_executable("glslangValidator") || Mix.raise("glslangValidator not found")
 
-    File.mkdir_p!("priv/spirv")
+    File.mkdir_p!("shaders/spirv")
 
     for {name, {source, macros}} <- NxStereo.Vulkan.variants() ++ NxStereo.Kernels.variants() do
-      output = "priv/spirv/#{name}.spv"
+      output = "shaders/spirv/#{name}.spv"
 
       args =
         ~w(-V --target-env vulkan1.1 -S comp) ++

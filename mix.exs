@@ -17,7 +17,7 @@ defmodule NxStereo.MixProject do
       package: [
         licenses: ["Apache-2.0"],
         files:
-          ~w(lib priv shaders native/Cargo.toml native/Cargo.lock native/stereo_match Makefile mix.exs README.md LICENSE OPENCV-LICENSE)
+          ~w(lib shaders native/Cargo.toml native/Cargo.lock native/stereo_match Makefile mix.exs README.md LICENSE OPENCV-LICENSE)
       ]
     ]
   end
