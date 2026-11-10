@@ -115,9 +115,11 @@ and compare: every shader on each Vulkan device (`mix test --include
 vulkan`), with a default that gives zeros, so only the shader can pass;
 and every native stage, alone and chained, against the same stages on
 Nx's evaluator. The native stages use the same `f32` operations in the
-same order, so their integer outputs and most `f32` ones are identical;
-sums reduced in another order agree to their rounding, and a rectified
-pixel whose sample falls on a rounding half may differ by one grey level.
+same order, so their integer outputs, rectified images included, and
+most `f32` ones are identical; sums reduced in another order agree to
+their rounding. EXLA's CPU code fuses some multiply-adds, so its
+rectified pixels may differ by one grey level where a sample falls on a
+rounding half.
 
 ## The matcher
 

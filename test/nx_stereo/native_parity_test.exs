@@ -67,11 +67,21 @@ defmodule NxStereo.NativeParityTest do
     outputs
   end
 
+  # A stage's Nx.block runs its Nx code on the global default compiler, in the
+  # segment's Task, so `compiler` is made the default too: EXLA's CPU code fuses
+  # some multiply-adds, where the native backend rounds each operation, as the
+  # evaluator does.
   defp both(stages, inputs, matcher, compiler \\ Nx.Defn.Evaluator) do
-    {:ok, members} = Segment.members(stages, geometry())
-    {:ok, nx} = NxSegment.build(members, geometry(), defn_options: [compiler: compiler])
-    {:ok, native} = NativeSegment.build(members, geometry(), matcher: matcher)
-    Enum.zip(run(NativeSegment, native, inputs), run(NxSegment, nx, inputs))
+    previous = Nx.Defn.global_default_options(compiler: compiler)
+
+    try do
+      {:ok, members} = Segment.members(stages, geometry())
+      {:ok, nx} = NxSegment.build(members, geometry(), defn_options: [compiler: compiler])
+      {:ok, native} = NativeSegment.build(members, geometry(), matcher: matcher)
+      Enum.zip(run(NativeSegment, native, inputs), run(NxSegment, nx, inputs))
+    after
+      Nx.Defn.global_default_options(previous)
+    end
   end
 
   defp ulps(a, b) do
@@ -99,33 +109,14 @@ defmodule NxStereo.NativeParityTest do
            inspect(key)
   end
 
-  # A sample that falls on a rounding half may round the other way: one
-  # pixel of the second pair's left image does.
-  defp assert_within_one_level(native, nx, key) do
-    difference =
-      Nx.subtract(
-        Nx.as_type(Map.fetch!(native, key), :s32),
-        Nx.as_type(Map.fetch!(nx, key), :s32)
-      )
-      |> Nx.abs()
-
-    assert Nx.to_number(Nx.reduce_max(difference)) <= 1, inspect(key)
-    assert Nx.to_number(Nx.mean(Nx.greater(difference, 0))) < 0.001, inspect(key)
-  end
-
   test "rectification and sharpness", %{matcher: matcher} do
     stages = [{Stage.Rectification, [right_row_offset: 0.5]}, {Stage.Sharpness, []}]
 
-    [{native, nx} | _] = pairs = both(stages, [frames(1), frames(2)], matcher)
-
-    for {native, nx} <- pairs do
-      assert_within_one_level(native, nx, :left)
-      assert_within_one_level(native, nx, :right)
+    for {native, nx} <- both(stages, [frames(1), frames(2)], matcher) do
+      assert_same(native, nx, :left)
+      assert_same(native, nx, :right)
+      assert_close(native, nx, :sharpness_sums)
     end
-
-    assert_same(native, nx, :left)
-    assert_same(native, nx, :right)
-    assert_close(native, nx, :sharpness_sums)
   end
 
   test "disparity, full and with 3 or 8 paths", %{matcher: matcher} do
