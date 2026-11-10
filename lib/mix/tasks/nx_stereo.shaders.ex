@@ -70,7 +70,7 @@ defmodule Mix.Tasks.NxStereo.Shaders do
       compile!(compiler, args, source, output)
     end
 
-    # The band shaders read the census features in the 128-disparity tiles.
+    # The band shaders read the census features in 8-row tiles.
     for band <- [8, 16, 32, 64], {stage, {source, flags}} <- @band_stages do
       output = "priv/spirv/#{stage}_b#{band}.spv"
 

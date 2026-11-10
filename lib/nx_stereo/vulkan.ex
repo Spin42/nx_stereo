@@ -101,7 +101,7 @@ defmodule NxStereo.Vulkan do
     if Code.ensure_loaded?(NxIREE.Vulkan.Pipeline), do: build_band(config)
   end
 
-  # Census in the 128-disparity tiles the band shaders read, the band's costs once,
+  # Census in 8-row tiles, the band's costs once,
   # a thread per path line, a lane per word of a pixel's band for the selection;
   # consistency and median as build/1. The horizontal scans run over a column-major
   # copy of the costs, the reverse one adding the forward one's path bytes, and the

@@ -1,5 +1,6 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
+// SPDX-License-Identifier: Apache-2.0
 // The band's costs in the column-major order (x * HEIGHT + y) the horizontal
 // scans read, each pixel's base appended as a last word. A workgroup moves a
 // TILE x TILE tile, a thread a pixel, its consecutive threads down a column:
