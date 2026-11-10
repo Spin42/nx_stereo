@@ -1,10 +1,10 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-// SPDX-License-Identifier: Apache-2.0
 // The band's costs in the column-major order (x * HEIGHT + y) the horizontal
-// scans read, each pixel's base appended as a last word, moved a TILE x TILE
-// tile of pixels at a time through shared memory, so both sides move in
-// contiguous runs.
+// scans read, each pixel's base appended as a last word. A workgroup moves a
+// TILE x TILE tile, a thread a pixel, its consecutive threads down a column:
+// the writes are contiguous runs, the reads runs of TILE pixels. Staging the
+// tile through shared memory is slower on Adreno GPUs.
 layout(local_size_x = 64) in;
 layout(constant_id = 0) const int WIDTH = 640;
 layout(constant_id = 1) const int HEIGHT = 480;
@@ -15,32 +15,12 @@ layout(set = 0, binding = 0) readonly buffer Source { uint source[]; };
 layout(set = 0, binding = 1) readonly buffer Base { int base[]; };
 layout(set = 0, binding = 2) writeonly buffer Target { uint target[]; };
 
-// The tile by column, then row; a padding word per column spreads the banks.
-shared uint tile[TILE * (TILE * PIXEL_WORDS + 1)];
-
-int slot(int column, int row, int w) { return column * (TILE * PIXEL_WORDS + 1) + row * PIXEL_WORDS + w; }
-
 void main() {
   int t = int(gl_LocalInvocationID.x);
-  int x0 = int(gl_WorkGroupID.x) * TILE;
-  int y0 = int(gl_WorkGroupID.y) * TILE;
-
-  for (int m = t; m < TILE * TILE * COST_WORDS; m += 64) {
-    int row = m / (TILE * COST_WORDS), within = m % (TILE * COST_WORDS);
-    int column = within / COST_WORDS, w = within % COST_WORDS;
-    int x = x0 + column, y = y0 + row;
-    tile[slot(column, row, w)] = x < WIDTH && y < HEIGHT ? source[(y * WIDTH + x) * COST_WORDS + w] : 0u;
-  }
-  for (int m = t; m < TILE * TILE; m += 64) {
-    int row = m / TILE, column = m % TILE;
-    int x = x0 + column, y = y0 + row;
-    tile[slot(column, row, COST_WORDS)] = x < WIDTH && y < HEIGHT ? uint(base[y * WIDTH + x]) : 0u;
-  }
-  barrier();
-  for (int m = t; m < TILE * TILE * PIXEL_WORDS; m += 64) {
-    int column = m / (TILE * PIXEL_WORDS), within = m % (TILE * PIXEL_WORDS);
-    int row = within / PIXEL_WORDS, w = within % PIXEL_WORDS;
-    int x = x0 + column, y = y0 + row;
-    if (x < WIDTH && y < HEIGHT) target[(x * HEIGHT + y) * PIXEL_WORDS + w] = tile[slot(column, row, w)];
-  }
+  int x = int(gl_WorkGroupID.x) * TILE + t / TILE;
+  int y = int(gl_WorkGroupID.y) * TILE + t % TILE;
+  if (x >= WIDTH || y >= HEIGHT) return;
+  int from = (y * WIDTH + x) * COST_WORDS, to = (x * HEIGHT + y) * PIXEL_WORDS;
+  for (int w = 0; w < COST_WORDS; ++w) target[to + w] = source[from + w];
+  target[to + COST_WORDS] = uint(base[y * WIDTH + x]);
 }
