@@ -1,6 +1,125 @@
 # NxStereo
 
-Semi-global stereo matching for [Nx](https://github.com/elixir-nx/nx).
+Stereo depth for [Nx](https://github.com/elixir-nx/nx): from a calibrated
+camera pair to a disparity map, metric depth and a point cloud, with
+measures of the rig's health. Every step is an Nx function, so it runs
+wherever Nx does, and has two faster implementations behind it:
+hand-written Vulkan shaders, when [NxIREE](https://github.com/Spin42/nx_iree)
+compiles it for a GPU, and native Rust, for a CPU.
+
+## A depth pipeline
+
+A pipeline is a list of stages, each a step such as rectification or
+matching, that run on a pair of camera frames and add their outputs to it.
+A segment runs a list of stages on a backend: `NxStereo.NxSegment`
+compiles them into one Nx function, `NxStereo.NativeSegment` computes them
+in a native program. From frames to depth and a point cloud:
+
+```elixir
+alias NxStereo.{Diagnostics, Rectify, Segment, Stage}
+
+# The rectified pair's geometry: working size, frame size, and each camera
+# from its calibration (camera matrix, distortion, rectification, projection).
+geometry = %{
+  width: 364,
+  height: 272,
+  frame_width: 728,
+  frame_height: 544,
+  focal_length_px: 436.5,
+  baseline_m: 0.2,
+  principal_point: {182.0, 136.0},
+  left_camera: Rectify.camera(left_k, left_d, left_r, left_p),
+  right_camera: Rectify.camera(right_k, right_d, right_r, right_p)
+}
+
+{:ok, members} =
+  Segment.members(
+    [
+      Stage.Rectification,
+      {Stage.Disparity, num_disparities: 64, paths: 8},
+      Stage.SpeckleFilter,
+      Stage.Depth,
+      {Stage.PointCloud, decimation: 4},
+      Stage.Quality
+    ],
+    geometry
+  )
+
+{:ok, segment} = NxStereo.NxSegment.build(members, geometry, defn_options: [compiler: EXLA])
+
+# For each pair of u8 camera frames:
+{:ok, outputs, segment} =
+  Segment.run(NxStereo.NxSegment, [left_frame: left, right_frame: right], segment, 5_000)
+
+outputs.disparity       # f32 {272, 364}, -1.0 where unmatched
+outputs.depth_mm        # u16 {272, 364}, 0 where unmatched
+outputs.cloud_grid      # f32 {68, 91, 3}, NaN outside 5 cm to 20 m
+Diagnostics.disparity_stats(outputs.quality_sums, 364 * 272)
+#=> %{matched: 0.95, mean_px: 16.16, spread_px: 0.93, jitter_px: 0.0}
+```
+
+Keep the segment `run/4` returns for the next pair: it carries what the
+stages pass from one pair to the next, such as the temporal filter's
+previous disparity. To compute the same stages natively, start the
+native program's server and build a native segment instead:
+
+```elixir
+{:ok, _matcher} = NxStereo.Matcher.start_link()
+{:ok, segment} = NxStereo.NativeSegment.build(members, geometry, [])
+```
+
+### The stages
+
+Each stage reads tensors by name and adds its own. Its settings are its
+options in the list; those marked live are inputs of the compiled function,
+changed without compiling again, the others are fixed when it compiles.
+
+| Stage | Reads | Adds | Settings | Native |
+| --- | --- | --- | --- | --- |
+| `Stage.Rectification` | `:left_frame`, `:right_frame` | `:left`, `:right` | `:right_row_offset` (live) | yes |
+| `Stage.Decode` | `:left_frame`, `:right_frame` | `:left`, `:right`, area-resized, for frames already rectified | | no |
+| `Stage.Sharpness` | `:left`, `:right` | `:sharpness_sums` | | yes |
+| `Stage.Disparity` | `:left`, `:right` | `:disparity` | `:p1`, `:p2`, `:uniqueness` (live); `:num_disparities`, `:paths`, `:search`, `:coarse_paths` | full search only |
+| `Stage.MedianFilter` | `:disparity` | `:disparity` | `:kernel_size` | yes |
+| `Stage.SpeckleFilter` | `:disparity` | `:disparity` | `:min_support`, `:max_diff` (live) | yes |
+| `Stage.RowAlignment` | `:left`, `:right`, `:disparity` | `:alignment_sums` | | yes |
+| `Stage.TemporalFilter` | `:disparity` | `:disparity`, carrying the previous one | `:alpha`, `:delta`, `:hold` (live) | yes |
+| `Stage.Depth` | `:disparity` | `:depth_mm`, `:depth_m` | | yes |
+| `Stage.PointCloud` | `:depth_m` | `:cloud_grid`, `:cloud_points` | `:decimation` | yes |
+| `Stage.Quality` | `:disparity` | `:quality_sums`, carrying the previous disparity | | yes |
+
+`NxStereo.Diagnostics` turns the `*_sums` into measures on the CPU:
+`sharpness/1`, `row_alignment/2` and `disparity_stats/2`. A stage of your
+own implements `NxStereo.Stage` and joins the list like the others.
+
+### Which backend
+
+| Backend | Runs on | Choose it for |
+| --- | --- | --- |
+| `NxSegment` with `NxIREE.Compiler` for Vulkan | a GPU, as the shaders in `priv/spirv` | a board with a Vulkan GPU: 30 pairs a second at 728x544 over 128 disparities on an Arduino VENTUNO Q's Adreno 623 |
+| `NativeSegment` | every core of a CPU, in `stereo_match` | a board without a usable GPU: 16 to 21 pairs a second at 480x270 over 64 disparities on a Raspberry Pi 5 |
+| `NxSegment` with EXLA | a CPU or CUDA GPU, as XLA code | a workstation, and the reference the others are checked against |
+| `NxSegment` with Nx alone | a CPU, in Elixir | checking results; far too slow for video |
+
+A stage with no native implementation, or `Stage.Disparity` with
+`search: "coarse_to_fine"`, runs in an `NxSegment`. A segment keeps two
+pairs in flight: send one with `send_request/2` while the previous one's
+outputs are collected (`NxStereo.Segment`).
+
+### How the implementations are kept equal
+
+Each stage's Nx code is the reference. The tests compile it with EXLA
+and compare: every shader on each Vulkan device (`mix test --include
+vulkan`), with a default that gives zeros, so only the shader can pass;
+and every native stage, alone and chained, against the same stages on
+Nx's evaluator. The native stages use the same `f32` operations in the
+same order, so their integer outputs and most `f32` ones are identical;
+sums reduced in another order agree to their rounding, and a rectified
+pixel whose sample falls on a rounding half may differ by one grey level.
+
+## The matcher
+
+`NxStereo.sgm/3` is the matching on its own:
 
 ```elixir
 disparity = NxStereo.sgm(left, right, disparities: 64, p1: 8, p2: 64)
@@ -20,7 +139,7 @@ faster frames, see [Speed or accuracy](#speed-or-accuracy).
 nearby objects shift by more than 128 pixels between the two images, run on
 downscaled images.
 
-## Coarse to fine
+### Coarse to fine
 
 Searching 128 disparities at full resolution costs twice as much as 64.
 `NxStereo.sgm_coarse_to_fine/3` gets most of the full search's matches for a
@@ -55,10 +174,10 @@ disparity.
 estimate: an `s32` `{height, width}` tensor, `-1` where a pixel has no
 estimate and should get no match.
 
-## Around the matcher
+## The functions under the stages
 
-The steps before and after matching are Nx functions too, so a whole depth
-pipeline compiles into one function:
+Each stage is a thin layer over Nx functions you can also call yourself,
+in a `defn` of your own:
 
   * `NxStereo.Rectify`: undistortion and rectification, as OpenCV's
     `initUndistortRectifyMap` and `remap`, with the calibration as inputs.
@@ -82,14 +201,15 @@ and the diagnostics run as hand-written shaders too (see
 
 ## What runs where
 
-`NxStereo.sgm/3`, `sgm_band/4` and `sgm_coarse_to_fine/3` are plain Nx. How
-they run depends on the compiler that calls them:
+Every stage and function is plain Nx. Compiled, how it runs depends on the
+compiler; the native backend is the one way to run the stages outside Nx:
 
 | Called through | Runs on | Needs |
 | --- | --- | --- |
 | Nx alone (`Nx.Defn.Evaluator`) | CPU, in Elixir; correct but far too slow for video | `nx` |
 | `EXLA` | CPU, or CUDA GPUs, as XLA code | `exla` |
 | `NxIREE.Compiler` for Vulkan | Vulkan GPUs, as the shaders in `priv/spirv` | `nx_iree`, plus `exla` where it compiles |
+| `NxStereo.NativeSegment` | CPU cores, in `stereo_match` | `cargo` where nx_stereo compiles |
 
 Only `NxIREE.Compiler` uses the shaders; every other compiler or backend runs
 the Nx implementation. All three give the same matches; subpixel values from
@@ -97,7 +217,8 @@ the shaders may differ in their last bit.
 
 The libraries play these roles:
 
-  * `nx_stereo`: the algorithm in Nx, and its Vulkan shaders.
+  * `nx_stereo`: the algorithms in Nx, their Vulkan shaders, and their
+    native implementation.
   * `exla`: turns Nx code into StableHLO, which NxIREE compiles. Only
     needed on the machine that compiles.
   * `nx_iree`: a compiler, `iree-compile`, that builds GPU programs on the
@@ -125,6 +246,15 @@ run `mix deps.compile nx_iree --force`, or compiling for Vulkan fails.
 
 Installing `nx_stereo` needs no shader compiler: the SPIR-V binaries in
 `priv/spirv` are committed (see [SPIR-V binaries](#spir-v-binaries)).
+
+The native backend is built when nx_stereo compiles, if `cargo` is
+installed: `stereo_match`, from `native/`, goes into the app's `priv`.
+Without cargo, or with `NX_STEREO_NATIVE=false`, it is skipped and only
+the Nx backends run. For a [Nerves](https://nerves-project.org) target it
+is cross-built with the toolchain and sysroot Nerves sets while it
+compiles the dependency, for the target's CPU: the target's Rust
+standard library must be installed (`rustup target add
+aarch64-unknown-linux-gnu` for a 64-bit Arm board).
 
 ## Running on a GPU
 
@@ -321,11 +451,33 @@ derived work. `consistency_projected.comp` follows OpenCV's StereoSGBM
 consistency rules and keeps OpenCV's BSD-3-Clause notice (see
 `OPENCV-LICENSE`). The rest of nx_stereo is Apache-2.0 (see `LICENSE`).
 
+## The native backend
+
+`stereo_match`, the Rust program in `native/stereo_match`, computes the
+stages on every core of a CPU. `NxStereo.Matcher` runs it as a Port, a
+separate process the BEAM talks to over its stdin and stdout, so a crash
+in it cannot take the BEAM down; it reopens the Port when it exits, and
+`:threads` sets how many cores it computes on (one per core by default).
+
+A native segment is configured in the program on its first pair with
+each stage's `native_kind/0`, its numeric build settings
+(`native_settings/1`) and the constants it shares with its Nx code
+(`native_constants/0`), such as the point cloud's depth range; a pair is
+then one request with its entries and each stage's params, and one reply
+with the outputs the Nx stages would have produced. The program keeps what
+depends only on the settings, such as the rectification maps, and what
+the stages carry from one pair to the next. It reads the next request and
+writes the previous reply while it computes, so two pairs in flight keep
+it busy. `native/stereo_match/src/protocol.rs` describes the messages.
+
 ## Tests
 
-`mix test` checks the reference implementation on EXLA and Nx's evaluator.
+`mix test` checks the reference implementation on EXLA and Nx's evaluator,
+and, when `stereo_match` was built, every native stage against it.
 `mix test --include vulkan` also compares the shaders with it on every
 Vulkan device (`NX_STEREO_DEVICE` selects devices by URI substring).
+`cargo test` in `native/` runs the native program's own tests, among them
+the matching against a step-by-step transcription of `NxStereo.sgm/3`.
 
 ## Benchmark
 
