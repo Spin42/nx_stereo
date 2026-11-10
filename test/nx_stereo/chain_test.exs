@@ -20,7 +20,8 @@ defmodule NxStereo.ChainTest do
   defp match(left, right, focal_length_px, baseline_m) do
     disparity = left |> NxStereo.sgm(right, disparities: 64) |> Image.median(5)
     {depth_mm, depth_m} = Depth.depth(disparity, focal_length_px, baseline_m)
-    {disparity, depth_mm, Depth.cloud_grid(depth_m, focal_length_px, 96.0, 48.0, 4)}
+    {cloud, _kept} = Depth.point_cloud(depth_m, focal_length_px, 96.0, 48.0, decimation: 4)
+    {disparity, depth_mm, cloud}
   end
 
   defp textured_pair(height, width, shift) do
@@ -95,7 +96,11 @@ defmodule NxStereo.ChainTest do
     |> Nx.to_number()
   end
 
+  # Points without depth are NaN in both.
   defp max_relative_difference(a, b) do
+    assert Nx.to_list(Nx.is_nan(a)) == Nx.to_list(Nx.is_nan(b))
+    {a, b} = {Nx.select(Nx.is_nan(a), 0.0, a), Nx.select(Nx.is_nan(b), 0.0, b)}
+
     a
     |> Nx.subtract(b)
     |> Nx.abs()
