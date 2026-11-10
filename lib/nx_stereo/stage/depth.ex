@@ -18,10 +18,7 @@ defmodule NxStereo.Stage.Depth do
 
   @impl NxStereo.Stage
   def init(settings, _geometry) do
-    case settings do
-      [] -> {:ok, nil}
-      _other -> {:error, "Depth takes no settings, got #{inspect(Keyword.keys(settings))}"}
-    end
+    with {:ok, _none} <- NxStereo.Stage.settings(settings, []), do: {:ok, nil}
   end
 
   @impl NxStereo.Stage

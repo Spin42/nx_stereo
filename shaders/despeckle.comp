@@ -16,7 +16,6 @@ layout(set = 0, binding = 0) readonly buffer Disparity { float disparity[]; };
 layout(set = 0, binding = 1) readonly buffer Params { float params[]; };
 layout(set = 0, binding = 2) writeonly buffer Output { float despeckled[]; };
 
-const int RADIUS = 3;
 const int QUAD = 4;
 const int TILE_WIDTH = 16 * QUAD;
 const int TILE_HEIGHT = 16;

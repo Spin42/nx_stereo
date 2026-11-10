@@ -7,8 +7,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // The reverse horizontal scan over the stored matching costs, paired with
 // the forward one.
-// Image size is a specialization constant; the disparity
-// range and lane layout stay compile-time macros.
 layout(constant_id = 0) const int WIDTH = 640;
 layout(constant_id = 1) const int HEIGHT = 480;
 #include "params.glsl"

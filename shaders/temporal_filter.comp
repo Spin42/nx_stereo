@@ -3,7 +3,7 @@
 // this pair and the previous one within delta, it moves alpha of the way from the
 // previous disparity to the new one; a pixel that lost its match keeps the
 // previous one for up to hold pairs. Writes the filtered disparity and the
-// pairs each pixel has gone unmatched, up to 255. The pixel count is a
+// pairs each pixel has gone unmatched, up to MAX_MISSED. The pixel count is a
 // multiple of 4; a thread's loads and stores are whole vec4s.
 layout(local_size_x = 64) in;
 
@@ -34,7 +34,7 @@ void main() {
     bool held = !matched && p[k] > 0.0 && misses <= hold;
 
     filtered_quad[k] = held ? p[k] : smoothed;
-    missed_quad[k] = min(misses, 255.0);
+    missed_quad[k] = min(misses, float(MAX_MISSED));
   }
   filtered[quad] = filtered_quad;
   missed_out[quad] = missed_quad;

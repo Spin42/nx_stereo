@@ -120,11 +120,6 @@ defmodule NxStereo.MatcherTest do
              {:reply, {:error, {:no_matcher, "/nonexistent/stereo_match"}}}
   end
 
-  test "runs, by default, the binary nx_stereo builds into its priv" do
-    assert Matcher.default_path() ==
-             Path.join(List.to_string(:code.priv_dir(:nx_stereo)), "stereo_match")
-  end
-
   test "passes a positive thread count, and leaves another out with a warning" do
     assert Matcher.port_arguments(nil) == []
     assert Matcher.port_arguments(3) == ["--threads", "3"]

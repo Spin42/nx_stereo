@@ -8,9 +8,6 @@
 //
 // WORDS=1 reads 32-bit pixels; WORDS=0 reads 8-bit images as words.
 #define GROUP 64
-#define BANDS 4
-#define REACH 2
-#define ROW_STEP 4
 #define PLANES (2 * REACH + 2)
 layout(local_size_x = GROUP) in;
 

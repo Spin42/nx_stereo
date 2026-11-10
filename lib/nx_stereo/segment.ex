@@ -227,7 +227,9 @@ defmodule NxStereo.Segment do
           {:cont, {:ok, specs ++ [{field, spec}]}}
 
         :error ->
-          {:halt, {:error, "a segment cannot read #{inspect(field)} from a CPU stage"}}
+          {:halt,
+           {:error,
+            "no stage before it provides #{inspect(field)}, and a segment cannot take it as an entry"}}
       end
     end)
   end

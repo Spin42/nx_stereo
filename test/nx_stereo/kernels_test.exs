@@ -7,15 +7,7 @@ defmodule NxStereo.KernelsTest do
 
   @moduletag :vulkan
 
-  setup_all do
-    {:ok, devices} = NxIREE.list_devices("vulkan")
-
-    devices =
-      Enum.filter(devices, &String.contains?(&1.uri, System.get_env("NX_STEREO_DEVICE", "")))
-
-    assert devices != []
-    {:ok, devices: devices}
-  end
+  setup_all do: NxStereo.TestDevices.vulkan()
 
   defp on_gpus(devices, fun, args) do
     for device <- devices do
@@ -69,7 +61,7 @@ defmodule NxStereo.KernelsTest do
     frame = texture(544, 728, 1)
     camera = Rectify.camera(@k, [-0.1, 0.02], @r, @p)
     want = reference(&Rectify.rectify(&1, &2, size: {272, 364}), [frame, camera])
-    vector = Nx.concatenate([Nx.flatten(camera.k), camera.d, Nx.flatten(camera.inverse_pr)])
+    vector = Rectify.camera_vector(camera)
 
     fun = fn frame, vector ->
       Kernels.rectify(frame, vector, {272, 364}, fn _ -> zeros({272, 364}, :u8) end)
@@ -85,7 +77,7 @@ defmodule NxStereo.KernelsTest do
     camera = Rectify.camera(@k, [-0.1, 0.02], @r, @p)
     packed = Packing.pack(Nx.to_binary(frame), 728, 544)
     {want, _} = reference(&Rectify.rectify_packed(&1, &2, size: {272, 364}), [packed, camera])
-    vector = Nx.concatenate([Nx.flatten(camera.k), camera.d, Nx.flatten(camera.inverse_pr)])
+    vector = Rectify.camera_vector(camera)
 
     fun = fn frame, vector ->
       Kernels.rectify(frame, vector, {272, 364}, fn _ ->

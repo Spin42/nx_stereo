@@ -3,6 +3,7 @@
 //! cores also run the BEAM and the compiled stages, a thread that loses its
 //! core then delays only the item it holds.
 
+use std::marker::PhantomData;
 use std::ops::Range;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -46,7 +47,7 @@ impl<T> Shared<T> {
 }
 
 /// Hands out rows in blocks, so threads slowed by other work take fewer.
-pub struct RowQueue {
+struct RowQueue {
     next: AtomicUsize,
     rows: usize,
 }
@@ -54,21 +55,104 @@ pub struct RowQueue {
 const ROWS_PER_TAKE: usize = 4;
 
 impl RowQueue {
-    pub fn new(rows: usize) -> RowQueue {
+    fn new(rows: usize) -> RowQueue {
         RowQueue {
             next: AtomicUsize::new(0),
             rows,
         }
     }
 
-    pub fn take(&self) -> Option<Range<usize>> {
+    fn take(&self) -> Option<Range<usize>> {
         let start = self.next.fetch_add(ROWS_PER_TAKE, Ordering::Relaxed);
         (start < self.rows).then(|| start..(start + ROWS_PER_TAKE).min(self.rows))
     }
 }
 
+/// The rows of a buffer, `row_length` elements each, for threads to fill:
+/// each row goes to the first thread that takes it, and to no other.
+pub struct Rows<'a, T> {
+    queue: RowQueue,
+    buffer: Shared<T>,
+    row_length: usize,
+    _buffer: PhantomData<&'a mut [T]>,
+}
+
+impl<'a, T: Send> Rows<'a, T> {
+    pub fn new(buffer: &'a mut [T], row_length: usize) -> Rows<'a, T> {
+        Rows {
+            queue: RowQueue::new(buffer.len() / row_length),
+            buffer: Shared::new(buffer),
+            row_length,
+            _buffer: PhantomData,
+        }
+    }
+
+    /// Calls `fill(y, row)` with each row `y` the calling thread takes,
+    /// until none is left.
+    pub fn fill(&self, mut fill: impl FnMut(usize, &mut [T])) {
+        while let Some(range) = self.queue.take() {
+            for y in range {
+                // SAFETY: `self` borrows the buffer alone, and the queue hands
+                // each row to one thread.
+                fill(y, unsafe { self.buffer.slice_mut(self.row(y)) });
+            }
+        }
+    }
+
+    /// Row `y`, which `fill` has filled.
+    ///
+    /// # Safety
+    /// No thread may fill row `y` while the slice lives.
+    pub unsafe fn filled(&self, y: usize) -> &[T] {
+        self.buffer.slice(self.row(y))
+    }
+
+    fn row(&self, y: usize) -> Range<usize> {
+        y * self.row_length..(y + 1) * self.row_length
+    }
+}
+
+/// Two buffers of `row_length`-element rows, filled as `Rows` fills one:
+/// row `y` of both by the same thread.
+pub struct RowPairs<'a, T, U> {
+    queue: RowQueue,
+    buffers: (Shared<T>, Shared<U>),
+    row_length: usize,
+    _buffers: PhantomData<(&'a mut [T], &'a mut [U])>,
+}
+
+impl<'a, T: Send, U: Send> RowPairs<'a, T, U> {
+    pub fn new(first: &'a mut [T], second: &'a mut [U], row_length: usize) -> RowPairs<'a, T, U> {
+        RowPairs {
+            queue: RowQueue::new(first.len().min(second.len()) / row_length),
+            buffers: (Shared::new(first), Shared::new(second)),
+            row_length,
+            _buffers: PhantomData,
+        }
+    }
+
+    /// Calls `fill(y, first_row, second_row)` with each row `y` the calling
+    /// thread takes, until none is left.
+    pub fn fill(&self, mut fill: impl FnMut(usize, &mut [T], &mut [U])) {
+        while let Some(range) = self.queue.take() {
+            for y in range {
+                let row = y * self.row_length..(y + 1) * self.row_length;
+                // SAFETY: `self` borrows the buffers alone, and the queue hands
+                // each row to one thread.
+                let (first, second) = unsafe {
+                    (
+                        self.buffers.0.slice_mut(row.clone()),
+                        self.buffers.1.slice_mut(row),
+                    )
+                };
+                fill(y, first, second);
+            }
+        }
+    }
+}
+
 /// Rows a thread follows a chunk down before it looks for other work.
-pub const ROWS_PER_CLAIM: usize = 8;
+const ROWS_PER_CLAIM: usize = 8;
 
 /// Column chunks a sweep follows down (or up) the image, each claimed by
 /// one thread at a time, with the number of rows each has done.
@@ -116,19 +200,51 @@ impl Chunks {
             .unwrap_or(0)
     }
 
+    /// One pass over the chunks, from the share of `thread` among
+    /// `threads`: each one free whose next row is `ready(chunk, row)` is
+    /// claimed, done `do_row(chunk, row)` down at most `ROWS_PER_CLAIM`
+    /// ready rows, each published once done, and released. Whether a row
+    /// was done.
+    pub fn claim_pass(
+        &self,
+        thread: usize,
+        threads: usize,
+        ready: impl Fn(usize, usize) -> bool,
+        mut do_row: impl FnMut(usize, usize),
+    ) -> bool {
+        let count = self.count();
+        let mut progressed = false;
+        for offset in 0..count {
+            let chunk = (thread * count / threads + offset) % count;
+            if !ready(chunk, self.progress(chunk)) || !self.try_claim(chunk) {
+                continue;
+            }
+            let first = self.progress(chunk);
+            let mut row = first;
+            while ready(chunk, row) && row - first < ROWS_PER_CLAIM {
+                do_row(chunk, row);
+                row += 1;
+                self.set_progress(chunk, row);
+            }
+            self.release(chunk);
+            progressed |= row > first;
+        }
+        progressed
+    }
+
     /// Whether the calling thread now holds `chunk`.
-    pub fn try_claim(&self, chunk: usize) -> bool {
+    fn try_claim(&self, chunk: usize) -> bool {
         self.claimed[chunk]
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
     }
 
     /// Publishes the rows a held `chunk` has done.
-    pub fn set_progress(&self, chunk: usize, rows: usize) {
+    fn set_progress(&self, chunk: usize, rows: usize) {
         self.progress[chunk].store(rows, Ordering::Release);
     }
 
-    pub fn release(&self, chunk: usize) {
+    fn release(&self, chunk: usize) {
         self.claimed[chunk].store(false, Ordering::Release);
     }
 }

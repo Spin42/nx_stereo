@@ -28,7 +28,7 @@ defmodule NxStereo.Stage.Rectification do
   def init(settings, geometry) do
     with :ok <- check_frame_size(geometry),
          {:ok, settings} <- NxStereo.Stage.settings(settings, right_row_offset: 0.0),
-         do: {:ok, Map.put(settings, :size, {geometry.height, geometry.width})}
+         do: {:ok, Map.put(settings, :size, NxStereo.Stage.size(geometry))}
   end
 
   @impl NxStereo.Stage

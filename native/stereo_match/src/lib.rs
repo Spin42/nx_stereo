@@ -10,7 +10,7 @@ mod depth;
 mod filters;
 pub mod framing;
 mod measures;
-pub mod parallel;
+mod parallel;
 mod paths;
 pub mod protocol;
 mod rectify;
@@ -22,7 +22,7 @@ pub mod tensor;
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use parallel::{on_threads, Backoff, Chunks, RowQueue, Shared, ROWS_PER_CLAIM};
+use parallel::{on_threads, Backoff, Chunks, RowPairs, Rows, Shared};
 use paths::{Sweep, SweepBuffers};
 
 /// The matching settings, as `NxStereo.sgm/3` takes them.
@@ -36,7 +36,7 @@ pub struct Parameters {
 }
 
 /// The highest Hamming distance between two Census features.
-pub const CENSUS_BITS: u8 = 48;
+const CENSUS_BITS: u8 = 48;
 
 impl Parameters {
     /// Why `NxStereo.sgm/3` would refuse these settings for a `width` x
@@ -140,7 +140,7 @@ impl Matcher {
             self.costs_and_rows::<D>(left, right, width, height, parameters);
             self.eight_paths::<D>(width, height, parameters);
         }
-        self.check(width, height)
+        self.consistency_and_median(width, height)
     }
 
     /// Each row's matching costs and the sum of its two horizontal paths.
@@ -155,22 +155,14 @@ impl Matcher {
         let volume = width * height * D;
         self.costs.resize(volume, 0);
         self.horizontal.resize(volume, 0);
-        let rows = RowQueue::new(height);
-        let costs = Shared::new(&mut self.costs);
-        let horizontal = Shared::new(&mut self.horizontal);
+        let rows = RowPairs::new(&mut self.costs, &mut self.horizontal, width * D);
         let work = |_thread| {
             let mut scratch = RowScratch::default();
-            while let Some(range) = rows.take() {
-                for y in range {
-                    let row = y * width * D..(y + 1) * width * D;
-                    // SAFETY: the queue hands each row to one thread.
-                    let (costs, horizontal) =
-                        unsafe { (costs.slice_mut(row.clone()), horizontal.slice_mut(row)) };
-                    scratch.costs_and_paths::<D>(
-                        left, right, width, height, y, parameters, costs, horizontal,
-                    );
-                }
-            }
+            rows.fill(|y, costs, horizontal| {
+                scratch.costs_and_paths::<D>(
+                    left, right, width, height, y, parameters, costs, horizontal,
+                );
+            });
         };
         on_threads(self.threads.min(height), &work);
     }
@@ -225,19 +217,17 @@ impl Matcher {
                 unsafe {
                     let (costs, horizontal) =
                         (costs.slice(at..at + D), horizontal.slice(at..at + D));
-                    let source = previous * width + x;
-                    let target = current * width + x;
-                    let next = states.slice_mut(target * stride..(target + 1) * stride);
-                    minimums.slice_mut(target..target + 1)[0] = paths::step::<D>(
-                        states.slice(source * stride..(source + 1) * stride),
-                        minimums.slice(source..source + 1)[0],
+                    let vertical = paths::step_slot::<D>(
+                        &states,
+                        &minimums,
+                        previous * width + x,
+                        current * width + x,
                         costs,
-                        next,
                         parameters.p1,
                         parameters.p2,
                     );
                     for ((sum, &horizontal), &vertical) in
-                        sums.iter_mut().zip(horizontal).zip(&next[1..D + 1])
+                        sums.iter_mut().zip(horizontal).zip(vertical)
                     {
                         *sum = u16::from(horizontal) + u16::from(vertical);
                     }
@@ -258,21 +248,12 @@ impl Matcher {
             let mut sums = [0u16; D];
             let mut backoff = Backoff::default();
             loop {
-                let mut progressed = false;
-                for offset in 0..chunks.count() {
-                    let chunk = (thread * chunks.count() / threads + offset) % chunks.count();
-                    if !ready(chunks.progress(chunk)) || !chunks.try_claim(chunk) {
-                        continue;
-                    }
-                    let (first, mut y) = (chunks.progress(chunk), chunks.progress(chunk));
-                    while ready(y) && y - first < ROWS_PER_CLAIM {
-                        vertical_row(chunk, y, &mut sums);
-                        y += 1;
-                    }
-                    chunks.set_progress(chunk, y);
-                    chunks.release(chunk);
-                    progressed |= y > first;
-                }
+                let mut progressed = chunks.claim_pass(
+                    thread,
+                    threads,
+                    |_chunk, y| ready(y),
+                    |chunk, y| vertical_row(chunk, y, &mut sums),
+                );
                 // A row may go into the ring once every chunk is done with the row it replaces.
                 let row = next_row.load(Ordering::Acquire);
                 if row < height
@@ -370,50 +351,30 @@ impl Matcher {
 
     /// The left-right check of every row, then the median filter, each
     /// median row once the three checked rows it reads are done.
-    fn check(&mut self, width: usize, height: usize) -> Vec<f32> {
+    fn consistency_and_median(&mut self, width: usize, height: usize) -> Vec<f32> {
         let mut filtered_image = vec![0.0; width * height];
-        let (checked_rows, median_rows) = (RowQueue::new(height), RowQueue::new(height));
         let done: Vec<AtomicBool> = (0..height).map(|_| AtomicBool::new(false)).collect();
         let (selected, keys) = (&self.selected, &self.keys);
-        let (checked, filtered) = (
-            Shared::new(&mut self.checked),
-            Shared::new(&mut filtered_image),
-        );
+        let checked = Rows::new(&mut self.checked, width);
+        let filtered = Rows::new(&mut filtered_image, width);
         let row = |y: usize| y * width..(y + 1) * width;
         let work = |_thread| {
             let mut right = Vec::new();
-            while let Some(range) = checked_rows.take() {
-                for y in range {
-                    // SAFETY: the queue hands each row to one thread.
-                    let checked_row = unsafe { checked.slice_mut(row(y)) };
-                    check::consistency_row(
-                        &selected[row(y)],
-                        &keys[row(y)],
-                        &mut right,
-                        checked_row,
-                    );
-                    done[y].store(true, Ordering::Release);
-                }
-            }
+            checked.fill(|y, checked_row| {
+                check::consistency_row(&selected[row(y)], &keys[row(y)], &mut right, checked_row);
+                done[y].store(true, Ordering::Release);
+            });
             let (mut keys, mut backoff) = (Vec::new(), Backoff::default());
-            while let Some(range) = median_rows.take() {
-                for y in range {
-                    let neighbours = [y.saturating_sub(1), y, (y + 1).min(height - 1)];
-                    while !neighbours.iter().all(|&y| done[y].load(Ordering::Acquire)) {
-                        backoff.wait();
-                    }
-                    backoff.reset();
-                    // SAFETY: checked rows are not written once done, and the
-                    // queue hands each median row to one thread.
-                    let (rows, filtered_row) = unsafe {
-                        (
-                            neighbours.map(|y| checked.slice(row(y))),
-                            filtered.slice_mut(row(y)),
-                        )
-                    };
-                    check::median_row(rows, &mut keys, filtered_row);
+            filtered.fill(|y, filtered_row| {
+                let neighbours = [y.saturating_sub(1), y, (y + 1).min(height - 1)];
+                while !neighbours.iter().all(|&y| done[y].load(Ordering::Acquire)) {
+                    backoff.wait();
                 }
-            }
+                backoff.reset();
+                // SAFETY: checked rows are not written once done.
+                let rows = neighbours.map(|y| unsafe { checked.filled(y) });
+                check::median_row(rows, &mut keys, filtered_row);
+            });
         };
         on_threads(self.threads.min(height), &work);
         filtered_image

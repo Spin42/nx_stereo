@@ -102,15 +102,7 @@ defmodule NxStereo.ImageTest do
   describe "on Vulkan through NxIREE" do
     @describetag :vulkan
 
-    setup do
-      {:ok, devices} = NxIREE.list_devices("vulkan")
-
-      devices =
-        Enum.filter(devices, &String.contains?(&1.uri, System.get_env("NX_STEREO_DEVICE", "")))
-
-      assert devices != []
-      {:ok, devices: devices}
-    end
+    setup do: NxStereo.TestDevices.vulkan()
 
     test "turbo matches the reference", %{devices: devices} do
       depth = Nx.iota({27, 48}, type: :f32) |> Nx.divide(100)

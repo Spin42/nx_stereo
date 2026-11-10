@@ -7,8 +7,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Forward horizontal scan: libSGM's register Census window produces the raw
 // matching costs, which are stored for the later scans alongside the path.
-// Image size is a specialization constant; the disparity
-// range and lane layout stay compile-time macros.
 layout(constant_id = 0) const int WIDTH = 640;
 layout(constant_id = 1) const int HEIGHT = 480;
 #define FEATURE_PAIR uvec4

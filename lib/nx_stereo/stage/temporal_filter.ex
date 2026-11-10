@@ -26,7 +26,7 @@ defmodule NxStereo.Stage.TemporalFilter do
   @impl NxStereo.Stage
   def init(settings, geometry) do
     with {:ok, settings} <- NxStereo.Stage.settings(settings, @defaults),
-         do: {:ok, Map.put(settings, :size, {geometry.height, geometry.width})}
+         do: {:ok, Map.put(settings, :size, NxStereo.Stage.size(geometry))}
   end
 
   @impl NxStereo.Stage

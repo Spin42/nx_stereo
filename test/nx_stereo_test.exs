@@ -252,18 +252,25 @@ defmodule NxStereoTest do
     end
   end
 
+  # GLSL's f32 division need not be correctly rounded, so subpixel values may
+  # differ in the last bit (here, at most two ulps); every decision must agree.
+  defp assert_same_decisions(gpu, reference, device) do
+    mismatches =
+      Enum.zip(gpu, reference)
+      |> Enum.with_index()
+      |> Enum.reject(fn {{a, b}, _} ->
+        a == -1.0 == (b == -1.0) and trunc(a) == trunc(b) and
+          abs(a - b) <= 2.4e-7 * max(abs(b), 1.0)
+      end)
+
+    assert mismatches == [],
+           "pixels differ on #{device.uri}: #{inspect(Enum.take(mismatches, 20))}"
+  end
+
   describe "on Vulkan through NxIREE" do
     @describetag :vulkan
 
-    setup do
-      {:ok, devices} = NxIREE.list_devices("vulkan")
-
-      devices =
-        Enum.filter(devices, &String.contains?(&1.uri, System.get_env("NX_STEREO_DEVICE", "")))
-
-      assert devices != []
-      {:ok, devices: devices}
-    end
+    setup do: NxStereo.TestDevices.vulkan()
 
     for {height, width, disparities} <- [{24, 160, 64}, {37, 203, 128}],
         scene <- [:shifted, :layered],
@@ -297,19 +304,7 @@ defmodule NxStereoTest do
             |> Nx.backend_transfer(Nx.BinaryBackend)
             |> Nx.to_flat_list()
 
-          # GLSL's f32 division need not be correctly rounded, so subpixel
-          # values may differ in the last bit (here, at most two ulps); every
-          # decision must agree.
-          mismatches =
-            Enum.zip(gpu, reference)
-            |> Enum.with_index()
-            |> Enum.reject(fn {{a, b}, _} ->
-              a == -1.0 == (b == -1.0) and trunc(a) == trunc(b) and
-                abs(a - b) <= 2.4e-7 * max(abs(b), 1.0)
-            end)
-
-          assert mismatches == [],
-                 "pixels differ on #{device.uri}: #{inspect(Enum.take(mismatches, 20))}"
+          assert_same_decisions(gpu, reference, device)
         end
       end
     end
@@ -359,16 +354,7 @@ defmodule NxStereoTest do
             |> Nx.backend_transfer(Nx.BinaryBackend)
             |> Nx.to_flat_list()
 
-          mismatches =
-            Enum.zip(gpu, reference)
-            |> Enum.with_index()
-            |> Enum.reject(fn {{a, b}, _} ->
-              a == -1.0 == (b == -1.0) and trunc(a) == trunc(b) and
-                abs(a - b) <= 2.4e-7 * max(abs(b), 1.0)
-            end)
-
-          assert mismatches == [],
-                 "pixels differ on #{device.uri}: #{inspect(Enum.take(mismatches, 20))}"
+          assert_same_decisions(gpu, reference, device)
         end
       end
     end
@@ -391,16 +377,7 @@ defmodule NxStereoTest do
             |> Nx.backend_transfer(Nx.BinaryBackend)
             |> Nx.to_flat_list()
 
-          mismatches =
-            Enum.zip(gpu, reference)
-            |> Enum.with_index()
-            |> Enum.reject(fn {{a, b}, _} ->
-              a == -1.0 == (b == -1.0) and trunc(a) == trunc(b) and
-                abs(a - b) <= 2.4e-7 * max(abs(b), 1.0)
-            end)
-
-          assert mismatches == [],
-                 "pixels differ on #{device.uri}: #{inspect(Enum.take(mismatches, 20))}"
+          assert_same_decisions(gpu, reference, device)
         end
       end
     end

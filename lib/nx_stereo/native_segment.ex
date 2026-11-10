@@ -81,16 +81,17 @@ defmodule NxStereo.NativeSegment do
   def depth, do: 2
 
   @doc """
-  Whether `module` declares the kind of its native implementation
-  (`c:NxStereo.Stage.native_kind/0`), for a stage to compute natively.
+  Whether the stage `module`, in `state`, computes natively: it declares
+  the kind of its native implementation (`c:NxStereo.Stage.native_kind/0`)
+  and its settings do not ask for Nx (`c:NxStereo.Stage.compute/1`).
   """
   @impl NxStereo.Segment
   @spec accepts?(module(), term(), :nx | :native) :: boolean()
-  def accepts?(module, _state, compute),
-    do: compute == :native and Stage.native_kind(module) != nil
+  def accepts?(module, state, compute),
+    do: compute == :native and refusal(%{module: module, state: state}) == nil
 
   @doc """
-  The segment of `members`, which it `accepts?/3`, for `geometry`, with
+  The segment of `members`, which it must `accepts?/3`, for `geometry`, with
   `opts`: `:matcher` (`NxStereo.Matcher`), the `NxStereo.Matcher` server
   its pairs go to.
   """
@@ -105,7 +106,8 @@ defmodule NxStereo.NativeSegment do
   end
 
   defp new_segment(members, geometry, matcher) do
-    with {:ok, specs} <- Segment.entry_specs(members, geometry) do
+    with nil <- Enum.find_value(members, &refusal/1),
+         {:ok, specs} <- Segment.entry_specs(members, geometry) do
       segment = %__MODULE__{
         matcher: matcher,
         owner: self(),
@@ -119,6 +121,20 @@ defmodule NxStereo.NativeSegment do
       }
 
       {:ok, configure(segment)}
+    end
+  end
+
+  # Why a member cannot compute natively, or nil.
+  defp refusal(%{module: module, state: state}) do
+    cond do
+      Stage.native_kind(module) == nil ->
+        {:error, "#{inspect(module)} has no native implementation"}
+
+      Stage.compute(module, state) == :nx ->
+        {:error, "#{inspect(module)} is computed in Nx, as its settings ask"}
+
+      true ->
+        nil
     end
   end
 

@@ -65,10 +65,7 @@ defmodule NxStereo.Rectify do
     {height, width} = size = Keyword.get(opts, :size, Nx.shape(image))
     {in_height, in_width} = Nx.shape(image)
 
-    if height > in_height or width > in_width do
-      raise ArgumentError,
-            "rectify/3 only shrinks, got #{in_height}x#{in_width} to #{height}x#{width}"
-    end
+    check_shrinks!({in_height, in_width}, size, "rectify/3")
 
     opts = [size: size, scale: {in_width / width, in_height / height}]
 
@@ -96,10 +93,7 @@ defmodule NxStereo.Rectify do
             "rectify_packed/3 needs a width that is a multiple of 4, got #{width}"
     end
 
-    if height > frame_height or width > words * 4 do
-      raise ArgumentError,
-            "rectify/3 only shrinks, got #{frame_height}x#{words * 4} to #{height}x#{width}"
-    end
+    check_shrinks!({frame_height, words * 4}, size, "rectify_packed/3")
 
     opts = [size: size, scale: {words * 4 / width, frame_height / height}]
 
@@ -114,8 +108,16 @@ defmodule NxStereo.Rectify do
     end)
   end
 
+  defp check_shrinks!({in_height, in_width}, {height, width}, function) do
+    if height > in_height or width > in_width do
+      raise ArgumentError,
+            "#{function} only shrinks, got #{in_height}x#{in_width} to #{height}x#{width}"
+    end
+  end
+
+  @doc false
   # The camera as one f32 vector, a kernel's input: k, d and inverse_pr, row-major.
-  defp camera_vector(camera) do
+  def camera_vector(camera) do
     Nx.concatenate([Nx.flatten(camera.k), camera.d, Nx.flatten(camera.inverse_pr)])
   end
 

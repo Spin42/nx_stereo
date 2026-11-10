@@ -7,6 +7,16 @@ defmodule NxStereo.Kernels do
 
   @spirv_dir Path.expand("../../priv/spirv", __DIR__)
 
+  # The values the kernels compile in; other values run the Nx code.
+  @despeckle_radius 3
+  @max_missed 255
+  @alignment %{bands: 4, reach: 2, row_step: 4}
+  @alignment_macros [
+    "-DBANDS=#{@alignment.bands}",
+    "-DREACH=#{@alignment.reach}",
+    "-DROW_STEP=#{@alignment.row_step}"
+  ]
+
   # Each kernel's GLSL source in shaders/ and its macros, for `mix nx_stereo.shaders`.
   @variants [
     rectify_words: {"rectify", ["-DWORDS=1"]},
@@ -14,10 +24,10 @@ defmodule NxStereo.Kernels do
     sharpness_rows_words: {"sharpness_rows", ["-DWORDS=1"]},
     sharpness_rows_bytes: {"sharpness_rows", ["-DWORDS=0"]},
     column_sums: {"column_sums", []},
-    despeckle: {"despeckle", []},
-    row_alignment_rows_words: {"row_alignment_rows", ["-DWORDS=1"]},
-    row_alignment_rows_bytes: {"row_alignment_rows", ["-DWORDS=0"]},
-    temporal_filter: {"temporal_filter", []},
+    despeckle: {"despeckle", ["-DRADIUS=#{@despeckle_radius}"]},
+    row_alignment_rows_words: {"row_alignment_rows", ["-DWORDS=1" | @alignment_macros]},
+    row_alignment_rows_bytes: {"row_alignment_rows", ["-DWORDS=0" | @alignment_macros]},
+    temporal_filter: {"temporal_filter", ["-DMAX_MISSED=#{@max_missed}"]},
     depth: {"depth", []},
     point_cloud_rows: {"point_cloud_rows", []},
     disparity_rows: {"disparity_rows", []}
@@ -30,11 +40,6 @@ defmodule NxStereo.Kernels do
           end)
 
   @group 64
-
-  # The values the kernels compile in; other values run the Nx code.
-  @despeckle_radius 3
-  @max_missed 255
-  @alignment %{bands: 4, reach: 2, row_step: 4}
 
   def variants, do: @variants
   def despeckle_radius, do: @despeckle_radius
@@ -49,17 +54,12 @@ defmodule NxStereo.Kernels do
     {frame_height, row} = Nx.shape(frame)
     frame_width = if words?, do: row * 4, else: row
     packed = Nx.template({height, div(width, 4)}, :u32)
+    image = Nx.template({height, width}, :s32)
 
-    outputs =
+    {outputs, template} =
       if words?,
-        do: [image: Nx.template({height, width}, :s32), packed: packed],
-        else: [packed: Nx.template({height, width}, :u8)]
-
-    template =
-      case Keyword.values(outputs) do
-        [image, packed] -> {image, packed}
-        [image] -> image
-      end
+        do: {[image: image, packed: packed], {image, packed}},
+        else: {[packed: Nx.template({height, width}, :u8)], Nx.template({height, width}, :u8)}
 
     block([frame, vector], template, default, fn ->
       kernel = %NxIREE.Vulkan.Kernel{
@@ -255,17 +255,16 @@ defmodule NxStereo.Kernels do
     values |> Enum.map(&(&1 |> Nx.as_type(:f32) |> Nx.reshape({1}))) |> Nx.concatenate()
   end
 
-  # The values `scalars/1` packed, for a default function, which sees only the block's inputs.
-  def unscalars(vector, count), do: for(i <- 0..(count - 1), do: vector[i])
-
-  # `default` takes the block's inputs as a list.
-  defp block(inputs, template, default, pipeline) do
+  # An Nx.block of `inputs` giving `template`: compiled by NxIREE for Vulkan, it runs the
+  # pipeline `pipeline.()` builds; everywhere else `default`, which takes the inputs as a list.
+  def block(inputs, template, default, pipeline) do
     if Code.ensure_loaded?(NxIREE.Vulkan.Pipeline),
       do: Nx.block(pipeline.(), inputs, template, spread(length(inputs), default)),
       else: default.(inputs)
   end
 
   # Nx.block calls its default with the struct, then each input.
+  defp spread(1, default), do: fn _, a -> default.([a]) end
   defp spread(2, default), do: fn _, a, b -> default.([a, b]) end
   defp spread(3, default), do: fn _, a, b, c -> default.([a, b, c]) end
   defp spread(4, default), do: fn _, a, b, c, d -> default.([a, b, c, d]) end
@@ -284,5 +283,5 @@ defmodule NxStereo.Kernels do
     Map.fetch!(@spirv, :"#{name}_#{variant}")
   end
 
-  defp ceil_div(a, b), do: div(a + b - 1, b)
+  def ceil_div(a, b), do: div(a + b - 1, b)
 end

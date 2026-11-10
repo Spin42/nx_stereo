@@ -31,13 +31,6 @@ defmodule NxStereo.NativeParityTest do
     }
   end
 
-  defp members(stages) do
-    for {stage, settings} <- stages do
-      {:ok, state} = stage.init(settings, geometry())
-      %{module: stage, name: stage, state: state}
-    end
-  end
-
   defp texture(height, width, seed) do
     {image, _key} =
       Nx.Random.randint(Nx.Random.key(seed), 0, 256, shape: {height, width}, type: :s32)
@@ -75,7 +68,7 @@ defmodule NxStereo.NativeParityTest do
   end
 
   defp both(stages, inputs, matcher, compiler \\ Nx.Defn.Evaluator) do
-    members = members(stages)
+    {:ok, members} = Segment.members(stages, geometry())
     {:ok, nx} = NxSegment.build(members, geometry(), defn_options: [compiler: compiler])
     {:ok, native} = NativeSegment.build(members, geometry(), matcher: matcher)
     Enum.zip(run(NativeSegment, native, inputs), run(NxSegment, nx, inputs))
@@ -123,12 +116,13 @@ defmodule NxStereo.NativeParityTest do
   test "rectification and sharpness", %{matcher: matcher} do
     stages = [{Stage.Rectification, [right_row_offset: 0.5]}, {Stage.Sharpness, []}]
 
-    for {native, nx} <- both(stages, [frames(1), frames(2)], matcher) do
+    [{native, nx} | _] = pairs = both(stages, [frames(1), frames(2)], matcher)
+
+    for {native, nx} <- pairs do
       assert_within_one_level(native, nx, :left)
       assert_within_one_level(native, nx, :right)
     end
 
-    [{native, nx} | _] = both(stages, [frames(1)], matcher)
     assert_same(native, nx, :left)
     assert_same(native, nx, :right)
     assert_close(native, nx, :sharpness_sums)

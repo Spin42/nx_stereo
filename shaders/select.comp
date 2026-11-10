@@ -11,8 +11,6 @@
 // summed in pairs: Adreno GPUs slow down sharply when a kernel reads more than
 // a few volumes at once. The 3-path selection runs in cost_line.comp's
 // vertical scan.
-// Image size is a specialization constant; the disparity
-// range and lane layout stay compile-time macros.
 layout(constant_id = 0) const int WIDTH = 640;
 layout(constant_id = 1) const int HEIGHT = 480;
 #include "params.glsl"
@@ -39,7 +37,6 @@ uint volume_uint(int volume, int at) {
 void main() {
   load_params();
   uint lane = gl_SubgroupInvocationID % LANES;
-  uint base = gl_SubgroupInvocationID - lane;
   int x = int(gl_WorkGroupID.x);
   int row = int(gl_LocalInvocationID.x) / LANES;
   int y = int(gl_WorkGroupID.y) * LINES + row;
@@ -59,5 +56,5 @@ void main() {
       for (int i = 0; i < PATH_PACK; ++i) stored[k + i] += pair[k + i];
     }
   }
-  select_sum(none, y * WIDTH + x, stored, select_geometry(x, lane, base));
+  select_sum(none, y * WIDTH + x, stored, select_geometry(x, lane));
 }

@@ -6,11 +6,11 @@
 //! between two 255 sentinels, which stand for the `p2 - p1` libSGM pads with,
 //! as both only ever lose to the `p2` jump.
 
-use crate::parallel::{on_threads, Backoff, Chunks, Shared, ROWS_PER_CLAIM};
+use crate::parallel::{on_threads, Backoff, Chunks, Shared};
 
-pub const SENTINEL: u8 = u8::MAX;
+const SENTINEL: u8 = u8::MAX;
 /// The largest padded state, for 128 disparities.
-pub const MAX_STATE: usize = 130;
+const MAX_STATE: usize = 130;
 
 /// The next state of a path from its `previous` one, whose lowest cost is
 /// `previous_minimum`, and the matching `costs`; returns the next lowest
@@ -39,6 +39,37 @@ pub fn step<const D: usize>(
         minimum = minimum.min(value);
     }
     minimum
+}
+
+/// Steps the path state in slot `source` of `states`, `D + 2` bytes a slot,
+/// into slot `target`, `minimums` holding each slot's lowest cost; returns
+/// the target's costs.
+///
+/// # Safety
+/// No other thread may access slot `target`, or write slot `source`, while
+/// the returned slice lives.
+#[inline(always)]
+pub unsafe fn step_slot<'a, const D: usize>(
+    states: &'a Shared<u8>,
+    minimums: &Shared<u8>,
+    source: usize,
+    target: usize,
+    costs: &[u8],
+    p1: u8,
+    p2: u8,
+) -> &'a [u8] {
+    let stride = D + 2;
+    let next_state = states.slice_mut(target * stride..(target + 1) * stride);
+    minimums.slice_mut(target..target + 1)[0] = step::<D>(
+        states.slice(source * stride..(source + 1) * stride),
+        minimums.slice(source..source + 1)[0],
+        costs,
+        next_state,
+        p1,
+        p2,
+    );
+    let next_state: &[u8] = next_state;
+    &next_state[1..D + 1]
 }
 
 /// A path state before the first step: zero costs.
@@ -164,18 +195,7 @@ impl<const N: usize> Sweep<'_, N> {
                     // holding it; the previous row's states it reads beside
                     // them are not written until it has done this row.
                     unsafe {
-                        let previous_state = states.slice(source * stride..(source + 1) * stride);
-                        let next_state = states.slice_mut(target * stride..(target + 1) * stride);
-                        let previous_minimum = minimums.slice(source..source + 1)[0];
-                        minimums.slice_mut(target..target + 1)[0] = step::<D>(
-                            previous_state,
-                            previous_minimum,
-                            costs,
-                            next_state,
-                            self.p1,
-                            self.p2,
-                        );
-                        &*(&next_state[1..D + 1] as *const [u8])
+                        step_slot::<D>(&states, &minimums, source, target, costs, self.p1, self.p2)
                     }
                 });
                 finish(y, x, paths);
@@ -186,23 +206,7 @@ impl<const N: usize> Sweep<'_, N> {
         let work = |thread: usize| {
             let mut backoff = Backoff::default();
             loop {
-                let mut progressed = false;
-                for offset in 0..chunks.count() {
-                    let chunk = (thread * chunks.count() / threads + offset) % chunks.count();
-                    if !ready(chunk, chunks.progress(chunk)) || !chunks.try_claim(chunk) {
-                        continue;
-                    }
-                    let mut row = chunks.progress(chunk);
-                    let first = row;
-                    while ready(chunk, row) && row - first < ROWS_PER_CLAIM {
-                        sweep_row(chunk, row);
-                        row += 1;
-                        chunks.set_progress(chunk, row);
-                    }
-                    chunks.release(chunk);
-                    progressed |= row > first;
-                }
-                if progressed {
+                if chunks.claim_pass(thread, threads, ready, sweep_row) {
                     backoff.reset();
                 } else if chunks.min_progress() == height {
                     break;
