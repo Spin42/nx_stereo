@@ -1,0 +1,8 @@
+[workspace]
+resolver = "2"
+members = ["stereo_match"]
+
+# A panic ends the program at once, so its Elixir driver sees the exit; the
+# program sends the panic's message first (`Writer::log_panics`).
+[profile.release]
+panic = "abort"

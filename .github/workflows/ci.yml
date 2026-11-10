@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  elixir:
+    name: Elixir · Nx and native backends
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: erlef/setup-beam@v1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+      - name: Install Rust, for the native backend and its tests
+        run: |
+          rustup toolchain install 1.90 --profile minimal
+          rustup default 1.90
+      - uses: actions/cache@v5
+        with:
+          path: |
+            deps
+            _build
+            native/target
+          key: elixir-${{ hashFiles('.tool-versions', 'mix.lock', 'native/Cargo.lock') }}
+      - run: mix deps.get
+      - run: mix format --check-formatted
+      - run: mix compile --warnings-as-errors
+      - run: mix test
+
+  native:
+    # The matching's NEON winner search is compiled and tested only on arm64.
+    name: Rust · stereo_match on ${{ matrix.runner }}
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@v5
+      - run: |
+          rustup toolchain install 1.90 --profile minimal --component rustfmt,clippy
+          rustup default 1.90
+      - run: cargo fmt --check
+      - run: cargo clippy --release --all-targets --locked -- -D warnings
+      - run: cargo test --release --locked
