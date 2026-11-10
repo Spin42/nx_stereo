@@ -11,11 +11,16 @@ defmodule NxStereo.Kernels do
   @variants [
     rectify_words: {"rectify", ["-DWORDS=1"]},
     rectify_bytes: {"rectify", ["-DWORDS=0"]},
+    sharpness_rows_words: {"sharpness_rows", ["-DWORDS=1"]},
+    sharpness_rows_bytes: {"sharpness_rows", ["-DWORDS=0"]},
     column_sums: {"column_sums", []},
     despeckle: {"despeckle", []},
+    row_alignment_rows_words: {"row_alignment_rows", ["-DWORDS=1"]},
+    row_alignment_rows_bytes: {"row_alignment_rows", ["-DWORDS=0"]},
     temporal_filter: {"temporal_filter", []},
     depth: {"depth", []},
-    point_cloud_rows: {"point_cloud_rows", []}
+    point_cloud_rows: {"point_cloud_rows", []},
+    disparity_rows: {"disparity_rows", []}
   ]
 
   @spirv (for {kernel, _source} <- @variants, into: %{} do
@@ -29,10 +34,12 @@ defmodule NxStereo.Kernels do
   # The values the kernels compile in; other values run the Nx code.
   @despeckle_radius 3
   @max_missed 255
+  @alignment %{bands: 4, reach: 2, row_step: 4}
 
   def variants, do: @variants
   def despeckle_radius, do: @despeckle_radius
   def max_missed, do: @max_missed
+  def alignment, do: @alignment
 
   # `frame` rectified to `{height, width}` by the camera `vector`: the u8 image
   # of a u8 frame, or, of a frame packed as u32 words, the s32 image and its
@@ -76,6 +83,28 @@ defmodule NxStereo.Kernels do
     end)
   end
 
+  # The six sharpness sums of `left` and `right`, both u8 or both s32.
+  def sharpness(left, right, default) do
+    {height, width} = Nx.shape(left)
+
+    block([left, right], Nx.template({6}, :f32), default, fn ->
+      rows = %NxIREE.Vulkan.Kernel{
+        spirv: image_kernel(:sharpness_rows, left),
+        workgroups: {height, 1, 1},
+        specialization: %{0 => width, 1 => height}
+      }
+
+      %NxIREE.Vulkan.Pipeline{
+        inputs: [:left, :right],
+        stages: [
+          {rows, [:left, :right], [partials: Nx.template({height * 6}, :f32)]},
+          {column_sums(height, 6), [:partials], [sums: Nx.template({6}, :f32)]}
+        ],
+        outputs: [:sums]
+      }
+    end)
+  end
+
   # The despeckled f32 `disparity`; `params` holds min_support and max_diff.
   def despeckle(disparity, params, default) do
     {height, width} = shape = Nx.shape(disparity)
@@ -92,6 +121,33 @@ defmodule NxStereo.Kernels do
         inputs: [:disparity, :params],
         stages: [{kernel, [:disparity, :params], [output: Nx.template(shape, :f32)]}],
         outputs: [:output]
+      }
+    end)
+  end
+
+  # The row alignment sums of `left` and `right`, both u8 or both s32, and the
+  # f32 `disparity`, as {bands, 2 * reach + 2}.
+  def row_alignment(left, right, disparity, default) do
+    {height, width} = Nx.shape(left)
+    %{bands: bands, reach: reach, row_step: row_step} = @alignment
+    sampled = ceil_div(height, row_step)
+    template = Nx.template({bands, 2 * reach + 2}, :f32)
+    values = Nx.size(template)
+
+    block([left, right, disparity], template, default, fn ->
+      rows = %NxIREE.Vulkan.Kernel{
+        spirv: image_kernel(:row_alignment_rows, left),
+        workgroups: {sampled, 1, 1},
+        specialization: %{0 => width, 1 => height}
+      }
+
+      %NxIREE.Vulkan.Pipeline{
+        inputs: [:left, :right, :disparity],
+        stages: [
+          {rows, [:left, :right, :disparity], [partials: Nx.template({sampled * values}, :f32)]},
+          {column_sums(sampled, values), [:partials], [sums: template]}
+        ],
+        outputs: [:sums]
       }
     end)
   end
@@ -172,6 +228,28 @@ defmodule NxStereo.Kernels do
     {grid, Nx.as_type(kept, :s32)}
   end
 
+  # The five disparity sums of the f32 `current` and `previous`.
+  def disparity_sums(current, previous, default) do
+    {height, width} = Nx.shape(current)
+
+    block([current, previous], Nx.template({5}, :f32), default, fn ->
+      rows = %NxIREE.Vulkan.Kernel{
+        spirv: Map.fetch!(@spirv, :disparity_rows),
+        workgroups: {height, 1, 1},
+        specialization: %{0 => width}
+      }
+
+      %NxIREE.Vulkan.Pipeline{
+        inputs: [:current, :previous],
+        stages: [
+          {rows, [:current, :previous], [partials: Nx.template({height * 5}, :f32)]},
+          {column_sums(height, 5), [:partials], [sums: Nx.template({5}, :f32)]}
+        ],
+        outputs: [:sums]
+      }
+    end)
+  end
+
   # Scalars, numbers or tensors, as the f32 vector a kernel reads them from.
   def scalars(values) do
     values |> Enum.map(&(&1 |> Nx.as_type(:f32) |> Nx.reshape({1}))) |> Nx.concatenate()
@@ -198,6 +276,12 @@ defmodule NxStereo.Kernels do
       workgroups: {columns, 1, 1},
       specialization: %{0 => rows, 1 => columns}
     }
+  end
+
+  # The variant of an image-reading kernel for `image`'s type: s32 pixels, or bytes read as words.
+  defp image_kernel(name, image) do
+    variant = if Nx.type(image) == {:s, 32}, do: "words", else: "bytes"
+    Map.fetch!(@spirv, :"#{name}_#{variant}")
   end
 
   defp ceil_div(a, b), do: div(a + b - 1, b)

@@ -3,7 +3,7 @@ defmodule NxStereo.KernelsTest do
   # default that gives zeros, so only the kernel can give the reference.
   use ExUnit.Case, async: true
 
-  alias NxStereo.{Depth, Filter, Kernels, Packing, Rectify}
+  alias NxStereo.{Depth, Diagnostics, Filter, Kernels, Packing, Rectify}
 
   @moduletag :vulkan
 
@@ -99,6 +99,33 @@ defmodule NxStereo.KernelsTest do
     end
   end
 
+  for type <- [:u8, :s32] do
+    test "the sharpness kernel sums #{type} images as its Nx code does", %{devices: devices} do
+      left = texture(272, 364, 3) |> Nx.put_slice([0, 0], Nx.broadcast(Nx.u8(0), {272, 10}))
+      right = texture(272, 364, 4) |> Nx.max(1)
+      [left, right] = Enum.map([left, right], &Nx.as_type(&1, unquote(type)))
+      want = reference(&Diagnostics.sharpness_sums/2, [left, right])
+      fun = &Kernels.sharpness(&1, &2, fn _ -> zeros({6}, :f32) end)
+
+      for {uri, got} <- on_gpus(devices, fun, [left, right]),
+          do: assert(close(got, want, 1.0e-5, true) == 1.0, uri)
+    end
+
+    test "the row alignment kernel sums #{type} images as its Nx code does", %{
+      devices: devices
+    } do
+      right = texture(272, 364, 6)
+      left = right |> Nx.pad(0, [{1, 0, 0}, {0, 4, 0}]) |> Nx.slice([0, 4], [272, 364])
+      [left, right] = Enum.map([left, right], &Nx.as_type(&1, unquote(type)))
+      disparity = disparity(272, 364, 7)
+      want = reference(&Diagnostics.row_alignment_sums/3, [left, right, disparity])
+      fun = &Kernels.row_alignment(&1, &2, &3, fn _ -> zeros({4, 6}, :f32) end)
+
+      for {uri, got} <- on_gpus(devices, fun, [left, right, disparity]),
+          do: assert(close(got, want, 0) == 1.0, uri)
+    end
+  end
+
   test "the speckle kernel keeps the pixels its Nx code keeps", %{devices: devices} do
     disparity = disparity(272, 364, 5)
     want = reference(&Filter.despeckle(&1, min_support: 12, max_diff: 1.0), [disparity])
@@ -173,6 +200,16 @@ defmodule NxStereo.KernelsTest do
       assert close(grid, want_grid, 1.0e-6, true) == 1.0, uri
       assert Nx.to_number(kept) == Nx.to_number(want_kept), uri
     end
+  end
+
+  test "the disparity sums kernel sums as its Nx code does", %{devices: devices} do
+    current = disparity(272, 364, 14)
+    previous = disparity(272, 364, 15)
+    want = reference(&Diagnostics.disparity_sums/2, [current, previous])
+    fun = &Kernels.disparity_sums(&1, &2, fn _ -> zeros({5}, :f32) end)
+
+    for {uri, got} <- on_gpus(devices, fun, [current, previous]),
+        do: assert(close(got, want, 1.0e-4, true) == 1.0, uri)
   end
 
   test "sizes the kernels do not take run the Nx code", %{devices: devices} do
