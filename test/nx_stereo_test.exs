@@ -314,8 +314,16 @@ defmodule NxStereoTest do
       end
     end
 
-    # A wide image's diagonal scans fold two diagonals into a line, a tall one's do not.
-    for {height, width} <- [{37, 203}, {90, 70}], band <- [16, 64], paths <- [3, 8] do
+    # Every band width on a wide image, whose diagonal scans fold two diagonals
+    # into a line, and one on a tall image, whose scans do not.
+    for {height, width, band} <- [
+          {37, 203, 8},
+          {37, 203, 16},
+          {37, 203, 32},
+          {37, 203, 64},
+          {90, 70, 16}
+        ],
+        paths <- [3, 8] do
       test "the band shaders match the reference at #{height}x#{width} with a band of #{band}, #{paths} paths",
            %{devices: devices} do
         {height, width} = {unquote(height), unquote(width)}
@@ -332,7 +340,7 @@ defmodule NxStereoTest do
               |> Nx.floor()
               |> Nx.as_type(:s32)
               |> Nx.subtract(4)
-              |> Nx.clip(0, 48)
+              |> Nx.clip(0, 64 - unquote(band))
               # Pixels without an estimate
               |> Nx.put_slice([10, div(width, 2)], Nx.broadcast(Nx.s32(-1), {8, div(width, 7)}))
 
