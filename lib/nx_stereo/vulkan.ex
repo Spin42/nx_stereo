@@ -122,7 +122,9 @@ defmodule NxStereo.Vulkan do
       }
     end
 
-    lines = %{rows: height, columns: width, diagonals: width + height - 1}
+    # A wide image's diagonal scans fold two diagonals into a line, as band_scan.comp.
+    diagonals = if width >= height, do: width, else: width + height - 1
+    lines = %{rows: height, columns: width, diagonals: diagonals}
     tiles = {ceil_div(width, 8), ceil_div(height, 8), 1}
 
     scan = fn stage, kind, directions, inputs ->

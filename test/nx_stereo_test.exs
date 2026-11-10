@@ -314,16 +314,18 @@ defmodule NxStereoTest do
       end
     end
 
-    for band <- [16, 64], paths <- [3, 8] do
-      test "the band shaders match the reference with a band of #{band}, #{paths} paths",
+    # A wide image's diagonal scans fold two diagonals into a line, a tall one's do not.
+    for {height, width} <- [{37, 203}, {90, 70}], band <- [16, 64], paths <- [3, 8] do
+      test "the band shaders match the reference at #{height}x#{width} with a band of #{band}, #{paths} paths",
            %{devices: devices} do
-        {left, right} = layered(37, 203, 4.5, 14.25)
+        {height, width} = {unquote(height), unquote(width)}
+        {left, right} = layered(height, width, 4.5, 14.25)
         opts = [disparities: 64, p1: 7, p2: 70, uniqueness: 1.05, paths: unquote(paths)]
         full = Nx.Defn.jit(&NxStereo.sgm(&1, &2, opts), compiler: EXLA).(left, right)
 
         base =
           if unquote(band) == 64,
-            do: Nx.broadcast(Nx.s32(0), {37, 203}),
+            do: Nx.broadcast(Nx.s32(0), {height, width}),
             else:
               full
               |> Nx.max(0)
@@ -332,7 +334,7 @@ defmodule NxStereoTest do
               |> Nx.subtract(4)
               |> Nx.clip(0, 48)
               # Pixels without an estimate
-              |> Nx.put_slice([10, 100], Nx.broadcast(Nx.s32(-1), {8, 30}))
+              |> Nx.put_slice([10, div(width, 2)], Nx.broadcast(Nx.s32(-1), {8, div(width, 7)}))
 
         band_opts = Keyword.put(opts, :band, unquote(band))
         sgm_band = &NxStereo.sgm_band(&1, &2, &3, band_opts)
