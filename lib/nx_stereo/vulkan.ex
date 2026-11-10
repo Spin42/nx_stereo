@@ -54,7 +54,7 @@ defmodule NxStereo.Vulkan do
                  {{stage, band}, "#{stage}_b#{band}", {source, ["-DBAND=#{band}" | flags]}}
                end)
 
-  @spirv_dir Path.expand("../../priv/spirv", __DIR__)
+  @spirv_dir Path.expand("../../shaders/spirv", __DIR__)
   @spirv (for {key, file, _source} <- @variants, into: %{} do
             path = Path.join(@spirv_dir, "#{file}.spv")
             @external_resource path

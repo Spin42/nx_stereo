@@ -33,10 +33,10 @@ cargo:
 	cd $(NATIVE_DIR) && $(CARGO_ENV) $(CARGO) build --release --locked --target $(RUST_TARGET) -p stereo_match
 endif
 
-# Mix links a path dependency's build priv to its source priv, which the
-# host and every target would then share: the build gets a priv of its own.
+# Mix links a build's priv to a source priv/ if there is one, which the host
+# and every target would then share: the build gets a priv of its own.
 all: cargo
-	if [ -L "$(PRIV_DIR)" ]; then rm "$(PRIV_DIR)" && mkdir -p "$(PRIV_DIR)" && cp -R $(CURDIR)/priv/. "$(PRIV_DIR)/"; fi
+	if [ -L "$(PRIV_DIR)" ]; then rm "$(PRIV_DIR)"; fi
 	mkdir -p $(PRIV_DIR)
 	install -m 755 $(RUST_OUT)/stereo_match $(PRIV_DIR)/stereo_match
 
