@@ -11,8 +11,10 @@
 # Each stage is compiled alone and its inputs are on the device, so a
 # stage's time is a call's: its kernels, the IREE code around them and the
 # call itself. "Call" is the time of a call that does nothing, the part of
-# each stage's time no kernel can remove. "Chain" runs every stage in one
-# call, as a pipeline does. Times are medians, in milliseconds.
+# each stage's time no kernel can remove. "Chain" runs the stages as one
+# NxStereo.NxSegment, as an application does: their settings as inputs, the
+# band at its default width, the outputs in one download. Times are medians,
+# in milliseconds.
 #
 # --kernels also lists, under each stage, the time of each of its Vulkan
 # kernels: each kernel compiled alone, its inputs the values the kernels
@@ -165,7 +167,7 @@ defmodule Bench.Kernels do
 end
 
 defmodule Bench.Pipeline do
-  alias NxStereo.{Depth, Diagnostics, Filter, Packing, Rectify}
+  alias NxStereo.{Depth, Diagnostics, Filter, NxSegment, Packing, Rectify, Segment, Stage}
 
   @defaults [
     size: "544x728",
@@ -234,31 +236,23 @@ defmodule Bench.Pipeline do
               ),
             else: []
 
-        {[[name, ms, differing] | kernels], Map.put(values, name, reference)}
+        {{[name, ms, differing], kernels}, Map.put(values, name, reference)}
       end)
 
-    rows = Enum.concat(rows)
+    stage_sum = rows |> Enum.map(fn {[_name, ms, _differing], _kernels} -> ms end) |> Enum.sum()
+    rows = Enum.flat_map(rows, fn {stage, kernels} -> [stage | kernels] end)
 
     call = Nx.Defn.jit(&Nx.add(&1, 1), gpu)
     scalar = Nx.backend_transfer(Nx.f32(0), {NxIREE.Backend, device: device})
     apply(call, [scalar])
     call_ms = median_ms(fn -> call.(scalar) end, opts[:runs])
 
-    chain = Nx.Defn.jit(&chain(&1, &2, &3, &4, &5, &6, stages), gpu)
-
-    chain_args =
-      Enum.map(
-        chain_inputs(),
-        &Nx.backend_copy(Map.fetch!(inputs, &1), {NxIREE.Backend, device: device})
-      )
-
-    apply(chain, chain_args)
-    chain_ms = median_ms(fn -> apply(chain, chain_args) end, opts[:runs])
+    chain_ms = segment_ms(inputs, size, frame_size, opts, gpu)
 
     print(
       [["Stage", "ms", "Differing"] | Enum.map(rows, &format/1)] ++
         [
-          ["Sum of stages", ms(stage_sum(rows)), ""],
+          ["Sum of stages", ms(stage_sum), ""],
           ["Chain", ms(chain_ms), ""],
           ["Call", ms(call_ms), ""]
         ]
@@ -303,11 +297,18 @@ defmodule Bench.Pipeline do
       camera: camera,
       previous: unmatched,
       missed: Nx.broadcast(Nx.f32(0.0), {height, width}),
-      settings: Nx.tensor([fx, cx, cy, 0.2], type: :f32)
+      settings: Nx.tensor([fx, cx, cy, 0.2], type: :f32),
+      left_image: left,
+      right_image: right,
+      geometry: %{
+        focal_length_px: fx,
+        baseline_m: 0.2,
+        principal_point: {cx, cy},
+        left_camera: camera,
+        right_camera: camera
+      }
     }
   end
-
-  defp chain_inputs, do: [:left_frame, :right_frame, :camera, :previous, :missed, :settings]
 
   # {name, function, its inputs by name, the largest difference from EXLA that counts as equal}.
   defp stages(size, opts) do
@@ -345,29 +346,39 @@ defmodule Bench.Pipeline do
     ]
   end
 
-  # Every stage in one function, as a pipeline compiles them.
-  defp chain(left_frame, right_frame, camera, previous, missed, settings, stages) do
-    values = %{
-      left_frame: left_frame,
-      right_frame: right_frame,
-      camera: camera,
-      previous: previous,
-      missed: missed,
-      settings: settings
-    }
+  # The time of a pair through every stage as one NxStereo.NxSegment, as an application
+  # compiles them: the stages' settings as inputs, their outputs in one download.
+  defp segment_ms(inputs, {height, width}, {frame_height, frame_width}, opts, gpu) do
+    disparity =
+      [num_disparities: opts[:disparities], paths: opts[:paths], search: opts[:search]] ++
+        if(opts[:search] == "coarse_to_fine", do: [coarse_paths: opts[:coarse_paths]], else: [])
 
-    stages
-    |> Enum.reduce(values, fn {name, fun, args, _tolerance}, values ->
-      Map.put(values, name, apply(fun, Enum.map(args, &Map.fetch!(values, &1))))
-    end)
-    |> Map.take([:cloud, :depth_m, :sharpness_sums, :row_alignment_sums, :disparity_sums])
-  end
+    stages = [
+      Stage.Rectification,
+      Stage.Sharpness,
+      {Stage.Disparity, disparity},
+      Stage.SpeckleFilter,
+      Stage.RowAlignment,
+      Stage.TemporalFilter,
+      Stage.Depth,
+      {Stage.PointCloud, decimation: 4},
+      Stage.Quality
+    ]
 
-  defp stage_sum(rows) do
-    rows
-    |> Enum.reject(&String.starts_with?(to_string(hd(&1)), " "))
-    |> Enum.map(&Enum.at(&1, 1))
-    |> Enum.sum()
+    geometry =
+      Map.merge(inputs.geometry, %{
+        width: width,
+        height: height,
+        frame_width: frame_width,
+        frame_height: frame_height
+      })
+
+    {:ok, members} = Segment.members(stages, geometry)
+    options = [byte_storage: not opts[:packed]] ++ gpu
+    {:ok, segment} = NxSegment.build(members, geometry, defn_options: options)
+    entries = [left_frame: inputs.left_image, right_frame: inputs.right_image]
+    {:ok, _outputs, segment} = Segment.run(NxSegment, entries, segment, :infinity)
+    median_ms(fn -> Segment.run(NxSegment, entries, segment, :infinity) end, opts[:runs])
   end
 
   def median_ms(fun, runs) do
