@@ -62,9 +62,23 @@ pipeline compiles into one function:
 
   * `NxStereo.Rectify`: undistortion and rectification, as OpenCV's
     `initUndistortRectifyMap` and `remap`, with the calibration as inputs.
+  * `NxStereo.Filter`: a speckle filter, which drops matches their
+    neighbours do not agree with, and a temporal filter, which smooths the
+    disparity over successive pairs and holds lost matches.
+  * `NxStereo.Depth`: metric depth and an organized point cloud from a
+    disparity map.
+  * `NxStereo.Diagnostics`: each camera's sharpness, the row offset
+    between the rectified images, and the disparity's matched share,
+    spread and jitter, to watch a rig's focus and calibration.
   * `NxStereo.Image`: area resizing, a 3x3 or 5x5 median and the turbo
     colour map.
-  * `NxStereo.Depth`: metric depth and a point cloud from a disparity map.
+  * `NxStereo.Packing`: 8-bit images as 32-bit words, four pixels each,
+    for a GPU without 8-bit storage; `NxStereo.Rectify.rectify_packed/3`
+    takes such frames.
+
+Compiled for Vulkan, rectification, the filters, depth, the point cloud
+and the diagnostics run as hand-written shaders too (see
+[The stages around the matcher](#the-stages-around-the-matcher)).
 
 ## What runs where
 
@@ -254,6 +268,23 @@ each 2x2 block of both images (for `s32` images; `u8` ones are shrunk in
 Nx), and `band_base.comp` derives the full-size bases from the coarse
 disparity, a thread per coarse pixel writing its 2x2 block of bases.
 
+### The stages around the matcher
+
+Each of these shaders replaces one function's Nx code, which stays the
+default on every other compiler and below the sizes a shader takes:
+
+| Function | Shader | What it does |
+| --- | --- | --- |
+| `Rectify.rectify/3`, `rectify_packed/3` | `rectify.comp` | Undistorts, rectifies and shrinks a frame read as 32-bit words, four pixels per thread, in the Nx code's order of operations, so a pixel differs only where a sample falls on a rounding half. |
+| `Filter.despeckle/2` | `despeckle.comp` | A 64x16 tile and its 3-pixel border in shared memory; a thread counts the agreeing neighbours of four pixels of a row, reading each neighbourhood row once for the four. |
+| `Filter.temporal/4` | `temporal_filter.comp` | Four pixels a thread, read and written as `vec4`s. |
+| `Depth.depth/3` | `depth.comp` | Two pixels a thread: metres as a `vec2`, millimetres as two 16-bit halves of a word. |
+| `Depth.point_cloud/5` | `point_cloud_rows.comp`, `column_sums.comp` | A workgroup per grid row unprojects its points and counts those kept; a second kernel adds the rows' counts. |
+| `Diagnostics.*_sums` | `sharpness_rows.comp`, `row_alignment_rows.comp`, `disparity_rows.comp`, `column_sums.comp` | A workgroup per image row reduces it to a few sums, exactly in 32-bit integers where they are counts or grey levels; `column_sums.comp` adds the rows. |
+
+The rectification and the image diagnostics take `u8` images, read as
+words, or `s32` ones, each a variant of the shader.
+
 ### Parameters
 
   * Image size, and for some shaders the disparity range or band margin, are
@@ -268,9 +299,9 @@ disparity, a thread per coarse pixel writing its 2x2 block of bases.
 
 ### SPIR-V binaries
 
-The binaries in `priv/spirv` are required: `NxStereo.Vulkan` reads them when
-it compiles, whether or not `nx_iree` is installed, and nx_stereo does not
-compile without them. They are committed so that installing nx_stereo needs
+The binaries in `priv/spirv` are required: `NxStereo.Vulkan` and
+`NxStereo.Kernels` read them when they compile, whether or not `nx_iree` is
+installed, and nx_stereo does not compile without them. They are committed so that installing nx_stereo needs
 no shader compiler. After changing a shader in `shaders/`, regenerate them
 with `glslangValidator` installed:
 
@@ -297,6 +328,16 @@ consistency rules and keeps OpenCV's BSD-3-Clause notice (see
 Vulkan device (`NX_STEREO_DEVICE` selects devices by URI substring).
 
 ## Benchmark
+
+`mix run bench/pipeline.exs` times each stage of a depth pipeline on a
+Vulkan device, on a synthetic textured pair: rectification, matching, the
+filters, depth, the point cloud and the diagnostics. Each stage is
+compiled alone, with its inputs on the device, and compared with EXLA's
+result for the same inputs; the whole chain is also timed in one call, as
+a pipeline compiles it, and so is a call that does nothing. Its options
+set the size, the search and paths, and `--packed` passes the frames as
+32-bit words. Run it after changing a shader to see what the change is
+worth and that the results still match.
 
 `mix run bench/datasets.exs` downloads the Middlebury MiddEval3 training
 scenes into `_build/bench` and reports, per scene, the share of pixels
