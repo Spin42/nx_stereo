@@ -15,6 +15,18 @@ defmodule NxStereo.DepthTest do
     assert_in_delta far, 240_000.0, 1.0
   end
 
+  # On Nx's evaluator, which casts a negative value to u16 without clamping it.
+  test "a negative depth, from a negative baseline, has no millimetres" do
+    defaults = Nx.Defn.default_options(compiler: Nx.Defn.Evaluator)
+
+    try do
+      {depth_mm, _depth_m} = Depth.depth(Nx.tensor([[10.0, 20.0]]), 400.0, -0.06)
+      assert Nx.to_list(depth_mm) == [[0, 0]]
+    after
+      Nx.Defn.default_options(defaults)
+    end
+  end
+
   test "the point cloud unprojects every decimation-th pixel from the first" do
     depth_m = Nx.broadcast(Nx.tensor(2.0), {48, 64})
 

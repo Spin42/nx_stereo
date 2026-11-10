@@ -27,7 +27,7 @@ defmodule NxStereo.Depth do
     matched = disparity > 0
     depth_m = Nx.select(matched, params[0] * params[1] / Nx.select(matched, disparity, 1), 0)
     rounded_mm = Nx.round(depth_m * 1000)
-    depth_mm = Nx.select(rounded_mm > 65_535, 0, rounded_mm) |> Nx.as_type(:u16)
+    depth_mm = Nx.select(rounded_mm > 65_535, 0, Nx.max(rounded_mm, 0)) |> Nx.as_type(:u16)
     {depth_mm, depth_m}
   end
 
