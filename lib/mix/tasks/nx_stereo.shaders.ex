@@ -2,7 +2,8 @@ defmodule Mix.Tasks.NxStereo.Shaders do
   @shortdoc "Compiles the Vulkan shaders into priv/spirv"
   @moduledoc """
   Compiles the GLSL sources in `shaders/` into the SPIR-V binaries shipped in
-  `priv/spirv`, one per stage and disparity range. Requires
+  `priv/spirv`, one per stage and disparity range or band, and the kernels of
+  the stages around the matcher. Requires
   `glslangValidator`; the binaries are committed, so users never run it.
 
       mix nx_stereo.shaders
@@ -78,6 +79,16 @@ defmodule Mix.Tasks.NxStereo.Shaders do
         ~w(-V --target-env vulkan1.1 -S comp) ++
           ["-DBAND=#{band}", "-DFEATURE_TILE=8"] ++
           flags ++ ["-o", output, "shaders/#{source}.comp"]
+
+      compile!(compiler, args, source, output)
+    end
+
+    # The kernels of the stages around the matcher.
+    for {kernel, {source, flags}} <- NxStereo.Kernels.variants() do
+      output = "priv/spirv/#{kernel}.spv"
+
+      args =
+        ~w(-V --target-env vulkan1.1 -S comp) ++ flags ++ ["-o", output, "shaders/#{source}.comp"]
 
       compile!(compiler, args, source, output)
     end

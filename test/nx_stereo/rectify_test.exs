@@ -14,6 +14,28 @@ defmodule NxStereo.RectifyTest do
 
   defp projection(fx, cx, cy), do: [fx, 0.0, cx, 0.0, 0.0, fx, cy, 0.0, 0.0, 0.0, 1.0, 0.0]
 
+  test "a packed frame rectifies to the s32 image of its bytes and that image's packing" do
+    frame = random_image(48, 64, 11)
+    camera = Rectify.camera(@k, [0.02], @identity, projection(90.0, 30.0, 22.0))
+    packed = NxStereo.Packing.pack(Nx.to_binary(frame), 64, 48)
+
+    {image, words} =
+      Nx.Defn.jit(&Rectify.rectify_packed(&1, &2, size: {24, 32})).(packed, camera)
+
+    reference = Nx.Defn.jit(&Rectify.rectify(&1, &2, size: {24, 32})).(frame, camera)
+    assert Nx.type(image) == {:s, 32}
+    assert Nx.to_list(image) == Nx.to_list(reference)
+    assert Nx.to_list(NxStereo.Packing.unpack_download(words)) == Nx.to_list(reference)
+  end
+
+  test "a packed frame needs a rectified width that is a multiple of 4" do
+    camera = Rectify.camera(@k, [], @identity, projection(100.0, 32.0, 24.0))
+
+    assert_raise ArgumentError, ~r/multiple of 4/, fn ->
+      Rectify.rectify_packed(Nx.broadcast(Nx.u32(0), {48, 16}), camera, size: {24, 30})
+    end
+  end
+
   test "identity calibration leaves the image unchanged" do
     image = random_image(48, 64, 1)
     camera = Rectify.camera(@k, [], @identity, projection(100.0, 32.0, 24.0))

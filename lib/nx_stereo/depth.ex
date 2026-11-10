@@ -11,12 +11,21 @@ defmodule NxStereo.Depth do
   rounded `u16` millimetres and as `f32` metres, both 0 where there is no
   match; the millimetres are 0 too beyond the 65535 mm they hold.
   """
-  defn depth(disparity, focal_length_px, baseline_m) do
+  deftransform depth(disparity, focal_length_px, baseline_m) do
+    params = NxStereo.Kernels.scalars([focal_length_px, baseline_m])
+
+    if rem(Nx.size(disparity), 2) == 0 do
+      NxStereo.Kernels.depth(disparity, params, fn [disparity, params] ->
+        depth_n(disparity, params)
+      end)
+    else
+      depth_n(disparity, params)
+    end
+  end
+
+  defnp depth_n(disparity, params) do
     matched = disparity > 0
-
-    depth_m =
-      Nx.select(matched, focal_length_px * baseline_m / Nx.select(matched, disparity, 1), 0)
-
+    depth_m = Nx.select(matched, params[0] * params[1] / Nx.select(matched, disparity, 1), 0)
     rounded_mm = Nx.round(depth_m * 1000)
     depth_mm = Nx.select(rounded_mm > 65_535, 0, rounded_mm) |> Nx.as_type(:u16)
     {depth_mm, depth_m}
@@ -45,23 +54,24 @@ defmodule NxStereo.Depth do
         do: Nx.Constants.infinity(:f32),
         else: opts[:max_depth_m]
 
-    settings =
-      Nx.stack(Enum.map([focal_length_px, cx, cy, opts[:min_depth_m], max_depth_m], &to_f32/1))
+    params = NxStereo.Kernels.scalars([focal_length_px, cx, cy, opts[:min_depth_m], max_depth_m])
 
-    point_cloud_n(depth_m, settings, decimation: opts[:decimation])
+    NxStereo.Kernels.point_cloud(depth_m, params, opts[:decimation], fn [depth_m, params] ->
+      point_cloud_n(depth_m, params, decimation: opts[:decimation])
+    end)
   end
 
-  defnp point_cloud_n(depth_m, settings, opts \\ []) do
+  defnp point_cloud_n(depth_m, params, opts \\ []) do
     decimation = opts[:decimation]
     z = sample(depth_m, decimation)
-    in_range = z > settings[3] and z < settings[4]
+    in_range = z > params[3] and z < params[4]
     # NaN depth unprojects to a NaN point: x and y scale with z.
     z = Nx.select(in_range, z, Nx.Constants.nan(:f32))
     u = Nx.iota(Nx.shape(z), axis: 1, type: :f32) * decimation
     v = Nx.iota(Nx.shape(z), axis: 0, type: :f32) * decimation
-    z_over_f = z / settings[0]
-    grid = Nx.stack([(u - settings[1]) * z_over_f, (v - settings[2]) * z_over_f, z], axis: -1)
-    {grid, in_range |> Nx.as_type(:s32) |> Nx.sum()}
+    z_over_f = z / params[0]
+    grid = Nx.stack([(u - params[1]) * z_over_f, (v - params[2]) * z_over_f, z], axis: -1)
+    {grid, in_range |> Nx.as_type(:f32) |> Nx.sum()}
   end
 
   deftransformp sample(depth_m, decimation) do
@@ -69,6 +79,4 @@ defmodule NxStereo.Depth do
     lengths = [div(height, decimation) * decimation, div(width, decimation) * decimation]
     Nx.slice(depth_m, [0, 0], lengths, strides: [decimation, decimation])
   end
-
-  defp to_f32(value), do: value |> Nx.as_type(:f32) |> Nx.reshape({})
 end
