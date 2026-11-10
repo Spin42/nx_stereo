@@ -84,7 +84,8 @@ defmodule NxStereo.FilterTest do
     assert temporal([-1.0], [8.0], [2.0], opts) == {[-1.0], [3.0]}
   end
 
-  test "temporal stops counting misses at 255" do
+  test "temporal stops counting misses at max_missed/0" do
+    assert Filter.max_missed() == 255
     assert temporal([-1.0], [-1.0], [255.0], hold: 2) == {[-1.0], [255.0]}
   end
 end

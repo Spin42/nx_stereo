@@ -79,6 +79,10 @@ defmodule NxStereo.Filter do
     Nx.tensor([[offsets]], type: :s32)
   end
 
+  @doc "The count of pairs missed at which `temporal/4` stops counting."
+  @spec max_missed() :: pos_integer()
+  def max_missed, do: NxStereo.Kernels.max_missed()
+
   @doc """
   One step of a temporal filter over successive disparity maps of a
   still or slowly moving scene. Returns the filtered disparity and the
@@ -90,7 +94,7 @@ defmodule NxStereo.Filter do
   pixels of each other, it moves `:alpha` of the way from the previous
   value to the new one; elsewhere it takes the new value. A pixel that
   loses its match keeps its previous disparity for up to `:hold` pairs.
-  The missed count stops at 255.
+  The missed count stops at `max_missed/0`.
 
   ## Options
 
@@ -104,7 +108,7 @@ defmodule NxStereo.Filter do
   deftransform temporal(current, previous, missed, opts \\ []) do
     opts = Keyword.validate!(opts, alpha: 0.4, delta: 2.0, hold: 2)
     params = NxStereo.Kernels.scalars([opts[:alpha], opts[:delta], opts[:hold]])
-    max_missed = NxStereo.Kernels.max_missed()
+    max_missed = max_missed()
 
     if rem(Nx.size(current), 4) == 0 do
       NxStereo.Kernels.temporal_filter(current, previous, missed, params, fn [c, p, m, params] ->
