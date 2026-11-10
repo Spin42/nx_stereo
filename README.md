@@ -488,8 +488,10 @@ compiled alone, with its inputs on the device, and compared with EXLA's
 result for the same inputs; the whole chain is also timed in one call, as
 a pipeline compiles it, and so is a call that does nothing. Its options
 set the size, the search and paths, and `--packed` passes the frames as
-32-bit words. Run it after changing a shader to see what the change is
-worth and that the results still match.
+32-bit words, and `--kernels` lists, under each stage, the time of each of
+its Vulkan kernels run alone. Run it after changing a shader to see what
+the change is worth and that the results still match;
+[Optimizing a stage](docs/optimizing.md) describes the whole method.
 
 `mix run bench/datasets.exs` downloads the Middlebury MiddEval3 training
 scenes into `_build/bench` and reports, per scene, the share of pixels
