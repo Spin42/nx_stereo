@@ -15,8 +15,6 @@ defmodule NxStereo.Stage.TemporalFilter do
   """
   @behaviour NxStereo.Stage
 
-  @defaults [alpha: 0.4, delta: 2.0, hold: 2]
-
   @impl NxStereo.Stage
   def requires, do: [:disparity]
 
@@ -24,8 +22,36 @@ defmodule NxStereo.Stage.TemporalFilter do
   def provides, do: [:disparity]
 
   @impl NxStereo.Stage
+  def settings do
+    [
+      alpha: %{
+        default: 0.4,
+        type: :float,
+        range: {0.05, 1},
+        live: true,
+        doc:
+          "Weight of a new disparity where it agrees with the previous one; 1 turns smoothing off"
+      },
+      delta: %{
+        default: 2.0,
+        type: :float,
+        range: {0, 8},
+        live: true,
+        doc: "Largest disparity change, in pixels, that is smoothed"
+      },
+      hold: %{
+        default: 2,
+        type: :integer,
+        range: {0, 10},
+        live: true,
+        doc: "Pairs a pixel that loses its match keeps its last disparity; 0 turns holding off"
+      }
+    ]
+  end
+
+  @impl NxStereo.Stage
   def init(settings, geometry) do
-    with {:ok, settings} <- NxStereo.Stage.settings(settings, @defaults),
+    with {:ok, settings} <- NxStereo.Stage.init_settings(__MODULE__, settings),
          do: {:ok, Map.put(settings, :size, NxStereo.Stage.size(geometry))}
   end
 

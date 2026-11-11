@@ -36,12 +36,41 @@ defmodule NxStereo.Stage do
   @type state :: term()
   @type geometry :: %{optional(atom()) => term()}
 
+  @typedoc """
+  A setting a stage takes: its `:default`, its `:type` (`:integer`,
+  `:float`, `:boolean`, `:string` or `:atom`), the values it accepts, as
+  a `:range` `{min, max}` with an optional `:step` or a list of
+  `:values`, the setting of the same stage it must exceed
+  (`:greater_than`), whether it is among the stage's params and so
+  changes without compiling again (`live: true`), the values of other
+  settings, not live, it only takes effect with (`:when`, such as
+  `[search: "coarse_to_fine"]`), and a one-line `:doc`. A `nil` default
+  is the stage's to fill in `init/2`.
+  """
+  @type setting :: %{
+          required(:default) => term(),
+          required(:type) => :integer | :float | :boolean | :string | :atom,
+          optional(:range) => {number(), number()},
+          optional(:step) => number(),
+          optional(:values) => [term()],
+          optional(:greater_than) => atom(),
+          optional(:live) => boolean(),
+          optional(:when) => keyword(),
+          optional(:doc) => String.t()
+        }
+
   @doc """
   Builds the stage's state from its settings and the geometry, or says
   why it cannot: a setting it does not take, or a value it cannot
   compute with.
   """
   @callback init(settings :: keyword(), geometry()) :: {:ok, state()} | {:error, String.t()}
+
+  @doc """
+  The settings `init/2` takes, by name. `init_settings/2` checks a
+  stage's settings against them.
+  """
+  @callback settings() :: [{atom(), setting()}]
 
   @doc "The tensors the stage reads."
   @callback requires() :: [atom()]
@@ -113,6 +142,72 @@ defmodule NxStereo.Stage do
     end
   end
 
+  @doc "The settings `module` declares; see `c:settings/0`."
+  @spec declared_settings(module()) :: [{atom(), setting()}]
+  def declared_settings(module) do
+    if Code.ensure_loaded?(module) and function_exported?(module, :settings, 0),
+      do: module.settings(),
+      else: []
+  end
+
+  @doc """
+  `settings` over the defaults `module` declares (`c:settings/0`), as a
+  map, for its `init/2`: a setting it does not declare, or a value its
+  declaration refuses, is an error. A `nil` value is left for `init/2`.
+  """
+  @spec init_settings(module(), keyword()) :: {:ok, map()} | {:error, String.t()}
+  def init_settings(module, settings) do
+    declared = declared_settings(module)
+    defaults = for {key, setting} <- declared, do: {key, setting.default}
+
+    with {:ok, values} <- settings(settings, defaults),
+         :ok <- check_values(declared, values),
+         do: check_order(declared, values)
+  end
+
+  defp check_values(declared, values) do
+    Enum.find_value(declared, :ok, fn {key, setting} ->
+      value = values[key]
+
+      if value != nil and not accepts?(setting, value),
+        do: {:error, "#{key} must be #{accepted(setting)}, got #{inspect(value)}"}
+    end)
+  end
+
+  defp check_order(declared, values) do
+    Enum.find_value(declared, {:ok, values}, fn
+      {key, %{greater_than: other}} ->
+        if values[key] <= values[other],
+          do: {:error, "#{key} must be above #{other} (#{values[other]}), got #{values[key]}"}
+
+      _setting ->
+        nil
+    end)
+  end
+
+  defp accepts?(%{values: values}, value), do: value in values
+
+  defp accepts?(%{type: type, range: {min, max}} = setting, value) do
+    typed?(type, value) and value >= min and value <= max and on_step?(setting, value)
+  end
+
+  defp accepts?(%{type: type}, value), do: typed?(type, value)
+
+  defp on_step?(%{step: step, range: {min, _max}}, value),
+    do: rem(round((value - min) * 1_000_000), round(step * 1_000_000)) == 0
+
+  defp on_step?(_setting, _value), do: true
+
+  defp typed?(:integer, value), do: is_integer(value)
+  defp typed?(:float, value), do: is_number(value)
+  defp typed?(:boolean, value), do: is_boolean(value)
+  defp typed?(:string, value), do: is_binary(value)
+  defp typed?(:atom, value), do: is_atom(value)
+
+  defp accepted(%{values: values}), do: "one of #{inspect(values)}"
+  defp accepted(%{range: {min, max}}), do: "from #{min} to #{max}"
+  defp accepted(%{type: type}), do: "of type #{type}"
+
   @doc "The inputs `module`, in `state`, takes for `geometry`; see `c:params/2`."
   @spec params(module(), state(), geometry()) :: map()
   def params(module, state, geometry) do
@@ -164,7 +259,8 @@ defmodule NxStereo.Stage do
       else: []
   end
 
-  @optional_callbacks params: 2,
+  @optional_callbacks settings: 0,
+                      params: 2,
                       carry: 2,
                       device_only: 0,
                       compute: 1,

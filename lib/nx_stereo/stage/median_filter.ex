@@ -17,7 +17,19 @@ defmodule NxStereo.Stage.MedianFilter do
   def provides, do: [:disparity]
 
   @impl NxStereo.Stage
-  def init(settings, _geometry), do: NxStereo.Stage.settings(settings, kernel_size: 5)
+  def settings do
+    [
+      kernel_size: %{
+        default: 5,
+        type: :integer,
+        values: [3, 5],
+        doc: "Width of the median filter's square window, in pixels"
+      }
+    ]
+  end
+
+  @impl NxStereo.Stage
+  def init(settings, _geometry), do: NxStereo.Stage.init_settings(__MODULE__, settings)
 
   @impl NxStereo.Stage
   def step(tensors, _params, state) do

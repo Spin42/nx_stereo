@@ -22,7 +22,20 @@ defmodule NxStereo.Stage.PointCloud do
   def provides, do: [:cloud_grid, :cloud_points]
 
   @impl NxStereo.Stage
-  def init(settings, _geometry), do: NxStereo.Stage.settings(settings, decimation: 4)
+  def settings do
+    [
+      decimation: %{
+        default: 4,
+        type: :integer,
+        range: {1, 16},
+        step: 1,
+        doc: "Depth pixels per cloud point in each direction"
+      }
+    ]
+  end
+
+  @impl NxStereo.Stage
+  def init(settings, _geometry), do: NxStereo.Stage.init_settings(__MODULE__, settings)
 
   @impl NxStereo.Stage
   def params(_state, geometry) do
