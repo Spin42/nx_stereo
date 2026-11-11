@@ -36,6 +36,15 @@ defmodule NxStereo.Stage.DisparityTest do
     assert Enum.any?(Nx.to_flat_list(actual), &(&1 > 0))
   end
 
+  test "declares the fine search's settings as applying to coarse to fine only" do
+    settings = Disparity.settings()
+
+    for key <- [:coarse_paths, :band, :margin, :fine_census],
+        do: assert(settings[key].when == [search: "coarse_to_fine"], inspect(key))
+
+    refute Map.has_key?(settings[:paths], :when)
+  end
+
   test "rejects unsupported bands before compiling the segment" do
     settings = [search: "coarse_to_fine", num_disparities: 128, band: 12]
 

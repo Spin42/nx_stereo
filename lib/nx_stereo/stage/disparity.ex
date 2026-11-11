@@ -76,6 +76,7 @@ defmodule NxStereo.Stage.Disparity do
           "full searches every disparity; coarse_to_fine refines a half-size match, much faster"
       },
       coarse_paths: %{
+        when: [search: "coarse_to_fine"],
         default: nil,
         type: :integer,
         values: [3, 8],
@@ -83,18 +84,21 @@ defmodule NxStereo.Stage.Disparity do
           "Aggregation paths of coarse_to_fine's half-size match, paths by default; 3 is faster"
       },
       band: %{
+        when: [search: "coarse_to_fine"],
         default: 16,
         type: :integer,
         values: [8, 16, 32, 64],
         doc: "Candidates per pixel in coarse_to_fine's fine search"
       },
       margin: %{
+        when: [search: "coarse_to_fine"],
         default: 4,
         type: :integer,
         range: {0, 63},
         doc: "Candidates below the coarse estimate in the fine search, less than band"
       },
       fine_census: %{
+        when: [search: "coarse_to_fine"],
         default: :sparse_9x7,
         type: :atom,
         values: [:sparse_9x7, :dense_9x5, :dense_9x5_blend],

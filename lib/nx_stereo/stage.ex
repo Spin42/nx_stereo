@@ -42,8 +42,10 @@ defmodule NxStereo.Stage do
   a `:range` `{min, max}` with an optional `:step` or a list of
   `:values`, the setting of the same stage it must exceed
   (`:greater_than`), whether it is among the stage's params and so
-  changes without compiling again (`live: true`), and a one-line `:doc`.
-  A `nil` default is the stage's to fill in `init/2`.
+  changes without compiling again (`live: true`), the values of other
+  settings, not live, it only takes effect with (`:when`, such as
+  `[search: "coarse_to_fine"]`), and a one-line `:doc`. A `nil` default
+  is the stage's to fill in `init/2`.
   """
   @type setting :: %{
           required(:default) => term(),
@@ -53,6 +55,7 @@ defmodule NxStereo.Stage do
           optional(:values) => [term()],
           optional(:greater_than) => atom(),
           optional(:live) => boolean(),
+          optional(:when) => keyword(),
           optional(:doc) => String.t()
         }
 
