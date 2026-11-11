@@ -45,6 +45,24 @@ void main() {
     int b = max(base[y * WIDTH + x], 0);
     uvec2 centre = features[2 * feature_index(x, y)];
     // The band's right census, lowest column first: candidate k is BAND - 1 - k.
+#if BAND == 64
+    // Bound the live census signatures while retaining consecutive shared loads.
+    int lowest = r * REACH + x - b - (BAND - 1) - first;
+    uint words[COST_WORDS];
+    for (int w = 0; w < COST_WORDS; ++w) words[w] = 0u;
+    for (int chunk_start = 0; chunk_start < BAND; chunk_start += 4) {
+      uvec2 band_census[4];
+      for (int j = 0; j < 4; ++j) band_census[j] = right_census[lowest + chunk_start + j];
+      for (int j = 0; j < 4; ++j) {
+        int k = BAND - 1 - chunk_start - j;
+        uvec2 right = band_census[j];
+        uint cost = bitCount(centre.x ^ right.x) + bitCount(centre.y ^ right.y);
+        int bit = 6 * k, w = bit / 32, shift = bit % 32;
+        words[w] |= cost << shift;
+        if (shift > 26) words[w + 1] |= cost >> (32 - shift);
+      }
+    }
+#else
     uvec2 band_census[BAND];
     int lowest = r * REACH + x - b - (BAND - 1) - first;
     for (int j = 0; j < BAND; ++j) band_census[j] = right_census[lowest + j];
@@ -57,6 +75,7 @@ void main() {
       words[w] |= cost << shift;
       if (shift > 26) words[w + 1] |= cost >> (32 - shift);
     }
+#endif
     for (int w = 0; w < COST_WORDS; ++w) costs[(y * WIDTH + x) * COST_WORDS + w] = words[w];
   }
 }

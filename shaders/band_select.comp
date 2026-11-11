@@ -15,6 +15,17 @@ layout(constant_id = 2) const int DISPARITIES = 128;
 #include "params.glsl"
 #include "band_common.glsl"
 layout(set = 0, binding = 1) readonly buffer Base { int base[]; };
+#if AGGREGATED
+#include "band_aggregate.glsl"
+layout(set = 0, binding = 2) readonly buffer Aggregate { uint aggregate[]; };
+#define OUTPUT_BINDING 3
+
+uvec4 summed(int i, int column_word) {
+  int pixel = i / WORDS, lane = i % WORDS;
+  return unpack_aggregate(aggregate[pixel * AGG_WORDS + lane],
+                          aggregate[pixel * AGG_WORDS + WORDS + lane / 4], 8 * (lane % 4));
+}
+#else
 // The horizontal paths arrive summed in one column-major volume, as the
 // horizontal scans write it; with 8 paths the others
 // arrive two to a buffer, the second volume after the first.
@@ -29,8 +40,6 @@ layout(set = 0, binding = 5) readonly buffer Path3 { uint path3[]; };
 #else
 #define OUTPUT_BINDING 4
 #endif
-layout(set = 0, binding = OUTPUT_BINDING) writeonly buffer LeftDisparity { float left_disparity[]; };
-layout(set = 0, binding = OUTPUT_BINDING + 1) writeonly buffer Winners { uint winners[]; };
 
 // Word `i` of the pixel's band summed across the paths, the horizontal sum's
 // at `column_word` of its column-major volume.
@@ -51,6 +60,10 @@ uvec4 summed(int i, int column_word) {
   return sum;
 }
 
+#endif
+layout(set = 0, binding = OUTPUT_BINDING) writeonly buffer LeftDisparity { float left_disparity[]; };
+layout(set = 0, binding = OUTPUT_BINDING + 1) writeonly buffer Winners { uint winners[]; };
+
 // A pixel's lanes are consecutive and WORDS-aligned within a subgroup.
 uint pixel_min(uint value) {
   for (uint span = WORDS / 2; span > 0; span /= 2) value = min(value, subgroupShuffleXor(value, span));
@@ -65,8 +78,10 @@ uint candidate(uint values[4], int lane, int k) {
 
 void main() {
   load_params();
-  int pixel = int(gl_GlobalInvocationID.x) / WORDS;
-  int lane = int(gl_GlobalInvocationID.x) % WORDS;
+  uint invocation = gl_GlobalInvocationID.x +
+                    gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  int pixel = int(invocation) / WORDS;
+  int lane = int(invocation) % WORDS;
   // No early return: every lane of a pixel takes part in the shuffles.
   bool inside = pixel < WIDTH * HEIGHT;
   int index = inside ? pixel : 0;

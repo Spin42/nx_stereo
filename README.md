@@ -79,7 +79,7 @@ changed without compiling again, the others are fixed when it compiles.
 | `Stage.Rectification` | `:left_frame`, `:right_frame` | `:left`, `:right` | `:right_row_offset` (live) | yes |
 | `Stage.Decode` | `:left_frame`, `:right_frame` | `:left`, `:right`, area-resized, for frames already rectified | | no |
 | `Stage.Sharpness` | `:left`, `:right` | `:sharpness_sums` | | yes |
-| `Stage.Disparity` | `:left`, `:right` | `:disparity` | `:p1`, `:p2`, `:uniqueness` (live); `:num_disparities`, `:paths`, `:search`, `:coarse_paths` | full search only |
+| `Stage.Disparity` | `:left`, `:right` | `:disparity` | `:p1`, `:p2`, `:uniqueness` (live); `:num_disparities`, `:paths`, `:search`, `:coarse_paths`, `:band`, `:margin`, `:fine_census` | full search only |
 | `Stage.MedianFilter` | `:disparity` | `:disparity` | `:kernel_size` | yes |
 | `Stage.SpeckleFilter` | `:disparity` | `:disparity` | `:min_support`, `:max_diff` (live) | yes |
 | `Stage.RowAlignment` | `:left`, `:right`, `:disparity` | `:alignment_sums` | | yes |
@@ -162,6 +162,20 @@ both sides. `:coarse_paths` sets the coarse matching's paths (3 or 8)
 separately from the fine one's: the band only has to contain the right
 disparity, so 3 coarse paths lose little. Images need an even height and
 width.
+
+`:fine_census` optionally changes only the fine descriptor. `:dense_9x5`
+compares all 44 neighbours in a 9x5 window; `:dense_9x5_blend` also averages
+the comparison centre with its rounded 3x3 Gaussian mean, rounding the
+average. Both retain the one-level threshold. The blended option reduces
+noise sensitivity in the tested scenes; coverage and individual scenes
+still vary. The default remains `:sparse_9x7`, including in the coarse pass.
+Direct `sgm_band/4` calls use the same choices under `:census`.
+
+```elixir
+disparity = NxStereo.sgm_coarse_to_fine(left, right,
+  band: 32, margin: 8, coarse_paths: 8, paths: 8,
+  fine_census: :dense_9x5_blend)
+```
 
 On the 2006 Middlebury pairs at half size (6 scenes), pixels both matchings
 match agree with the full 128-disparity `sgm/3` within 1 pixel:
@@ -371,6 +385,10 @@ The shaders share a few layouts:
 | Consistency | `consistency_projected.comp` | OpenCV SGBM's rule: each row's winners are projected into a pseudo right disparity map in shared memory, and a left match is dropped when the right map disagrees by more than one disparity. |
 | Median | `filter.comp` | libSGM's 3x3 median selection network. |
 
+For 128 disparities and three paths, `cost_first.comp` with `FUSED` performs
+both horizontal scans in one dispatch and output volume. The other full-range
+configurations retain separate forward and reverse dispatches.
+
 The scans follow libSGM: a line's disparities are spread over 8 or 16 lanes
 of a subgroup, 8 disparities each, and the recurrence's neighbours across
 lanes arrive through subgroup shuffles. `cost_dp.glsl` holds the
@@ -379,27 +397,34 @@ recurrence, `cost_select.glsl` the selection.
 ### `sgm_band/4`
 
 A pixel's candidates are the `:band` disparities from its base, and
-neighbouring pixels' bands differ, so the scans hold each line's whole band
-in a thread's registers instead of spreading it over lanes.
+neighbouring pixels' bands can differ. Bands of 8 or 16 stay in one
+thread's registers; bands of 32 or 64 use one subgroup lane per four
+candidates to keep the per-thread state small.
 
 | Stage | Shader | What it does |
 | --- | --- | --- |
-| Census | `census_pair.comp` | As in `sgm/3`. |
-| Costs | `band_cost.comp` | Each pixel's matching costs for its band, once for every path, packed 6 bits a candidate. A workgroup covers 4 rows of 64 pixels and loads the right Census of every column they reach into shared memory once. |
+| Census | `census_pair.comp`, `census_dense_pair.comp` | The default sparse window, or a dense 9x5 window with an optional blended centre. |
+| Costs | `band_cost.comp` | Each pixel's matching costs for its band, once for every path, packed 6 bits a candidate. A workgroup covers 4 rows of 64 pixels and loads the right Census of every column they reach into shared memory once. Band 64 processes four signatures at a time to bound live state. |
 | Transpose | `band_transpose.comp` | A column-major copy of the costs with each pixel's base appended, so a horizontal scan's lines are consecutive in memory, as a vertical scan's are. |
-| Scans | `band_scan.comp` | The path recurrence, a thread per line. At each step the previous pixel's costs move to the new pixel's band through a barrel shifter over their packed bytes, so every array index stays constant and the band stays in registers; a candidate the previous band lacks costs P2. The reverse horizontal scan adds the forward one's path, and with 8 paths each dispatch scans two directions. On an image at least as wide as it is high, a thread follows a diagonal to the image's side and continues on the one that enters there, so no thread runs outside the image. |
-| Selection | `band_select.comp` | `band / 4` lanes per pixel, each summing one word of the paths; the winner, the second best and the winner's neighbours are combined across those lanes with shuffles. Writes the same winner keys as `sgm/3`. |
+| Narrow scans | `band_scan.comp` | A thread per line, aligning previous costs with a packed-byte barrel shifter. A band of 16 skips alignment when the base stays the same. The horizontal traversal adds both directions in one output volume. |
+| Wide scans | `band_scan_lanes.comp` | Four candidates per subgroup lane. A reduction finds the previous minimum and shuffles gather the shifted window; consecutive lanes write consecutive path words. Horizontal paths share one output volume. Bands of 32 skip realignment when the base is unchanged. |
+| Wide aggregation | `band_scan_aggregate.comp` | Opposite vertical and diagonal paths share a dispatch. Their costs accumulate in 10 bits per candidate, retaining one aggregate instead of six path volumes. Four lanes share the extra high-byte word. |
+| Selection | `band_select.comp` | `band / 4` lanes per pixel, each reading four aggregate costs or summing a word of the paths; the winner, the second best and the winner's neighbours are combined across those lanes with shuffles. Writes the same winner keys as `sgm/3`. |
 | Consistency, median | `consistency_projected.comp`, `filter.comp` | As in `sgm/3`. |
 
-`band_common.glsl` holds the band's layouts. A pixel with a negative base is
-searched from disparity 0, so the paths through it stay defined, and gets
-no match.
+`band_common.glsl` holds the band's layouts; `band_scan_geometry.glsl`
+shares the line coordinates and folded diagonal restarts. `band_scan_lanes.glsl`
+shares the wide-band recurrence, and `band_aggregate.glsl` decodes its packed
+sums. Both scan implementations charge P2 for a missing previous candidate. The reverse
+horizontal scan adds the forward path, and eight-path matching scans two
+directions per dispatch. A negative base is searched from disparity 0 so
+paths through it stay defined, but that pixel gets no match.
 
 ### `sgm_coarse_to_fine/3`
 
 Between its two matchings run two small shaders: `shrink.comp` averages
-each 2x2 block of both images (for `s32` images; `u8` ones are shrunk in
-Nx), and `band_base.comp` derives the full-size bases from the coarse
+each 2x2 block of both images after converting their pixels to `s32`,
+and `band_base.comp` derives the full-size bases from the coarse
 disparity, a thread per coarse pixel writing its 2x2 block of bases.
 
 ### The stages around the matcher
@@ -414,7 +439,7 @@ default on every other compiler and below the sizes a shader takes:
 | `Filter.temporal/4` | `temporal_filter.comp` | Four pixels a thread, read and written as `vec4`s. |
 | `Depth.depth/3` | `depth.comp` | Two pixels a thread: metres as a `vec2`, millimetres as two 16-bit halves of a word. |
 | `Depth.point_cloud/5` | `point_cloud_rows.comp`, `column_sums.comp` | A workgroup per grid row unprojects its points and counts those kept; a second kernel adds the rows' counts. |
-| `Diagnostics.*_sums` | `sharpness_rows.comp`, `row_alignment_rows.comp`, `disparity_rows.comp`, `column_sums.comp` | A workgroup per image row reduces it to a few sums, exactly in 32-bit integers where they are counts or grey levels; `column_sums.comp` adds the rows. |
+| `Diagnostics.*_sums` | `sharpness_rows.comp`, `row_alignment_rows.comp`, `disparity_rows.comp`, `column_sums.comp` | A workgroup per row reduces it to a few sums; row alignment uses one per sampled row and band. Counts and grey-level sums use exact 32-bit integers; `column_sums.comp` adds the rows. |
 
 The rectification and the image diagnostics take `u8` images, read as
 words, or `s32` ones, each a variant of the shader.
@@ -500,13 +525,54 @@ its Vulkan kernels run alone. Run it after changing a shader to see what
 the change is worth and that the results still match;
 [Optimizing a stage](docs/optimizing.md) describes the whole method.
 
-`mix run bench/datasets.exs` downloads the Middlebury MiddEval3 training
-scenes into `_build/bench` and reports, per scene, the share of pixels
-matched and of pixels more than 2 disparities off. On a Vulkan device it also
-counts the pixels where the shaders and the reference disagree, and times a
-frame. `--datasets middlebury,eth3d,kitti` adds ETH3D (needs `7z`) and KITTI
-2015 (1.7 GB); `--paths 3` measures the faster mode; `--device` selects a
-Vulkan device by URI substring.
+`mix run bench/stream.exs` measures the complete chain on a changing sequence
+of CPU frames. It uploads every pair, propagates temporal state and downloads
+all published outputs. Serial and overlapped modes must produce identical
+outputs and carry before timing starts. The report separates sustained FPS,
+completion intervals and frame latency, including counts above 33.33 ms.
+Compilation, warm-up, camera capture and display are outside the measurement.
+
+```shell
+mix run bench/stream.exs --size 544x728 --band 32 --margin 8 --coarse-paths 8 --packed --frames 300 --rounds 3
+```
+
+`--mode serial|overlap|both` chooses how downloads run; `--sequence` controls
+the number of distinct precomputed pairs. Both modes use the same sequence,
+and their order alternates between rounds. `--warmup` sets warm-up frames.
+Both `pipeline.exs` and `stream.exs` accept `--cloud-decimation` (default 4).
+A value of 1 publishes a point at every depth pixel, producing 16 times as
+many grid points as the default. The reported grid dimensions and complete
+chain timings include that output density and its download.
+
+`mix run bench/datasets.exs` caches the Middlebury MiddEval3 training scenes
+in `_build/bench` and reports coverage, matched pixels more than 2 disparities
+off, bad-or-missing pixels and mean absolute disparity error. On Vulkan it
+also compares the output with EXLA and records median and p90 matcher times
+after warmup, with resident inputs and the output downloaded each time.
+
+```shell
+mix run bench/datasets.exs --datasets middlebury,eth3d,kitti --search coarse_to_fine --paths 8 --coarse-paths 3 --band 16 --margin 4 --runs 20 --csv quality.csv
+```
+
+ETH3D needs `7z`; KITTI 2015 downloads 1.7 GB. `--device` selects a Vulkan
+device by URI substring, `--scene` selects scene names containing a string,
+and `--no-reference` skips the EXLA comparison. `--p1`, `--p2` and
+`--uniqueness` set the penalties and rejection threshold. An explicit
+`--disparities 64` or `128` scores only supported ground truth and reports
+its share; coarse-to-fine always uses 128. Full search without that option
+keeps automatic range selection and skips scenes beyond 127 disparities.
+Dataset summaries weight scenes equally. Matcher times do not include the
+other camera pipeline stages. All three benchmarks accept
+`--fine-census sparse_9x7|dense_9x5|dense_9x5_blend` with coarse-to-fine
+search, and CSV records the selected descriptor.
+
+`--perturbation clean|noise2|noise4|noise8|gain0.8|gain1.2|blur_right`
+selects reproducible image conditions, recorded in CSV. Noise is independent
+between eyes, with Gaussian standard deviation 2, 4 or 8 grey levels and
+fixed left/right seeds 271/723. Exposure changes only the right image: gain
+0.8 adds 8, gain 1.2 subtracts 8. Blur applies a 3x3 box filter to the right
+image with zero padding. Intensities are rounded and clipped to bytes;
+ground truth is unchanged. These transforms run before compilation and timing.
 
 ## Examples
 

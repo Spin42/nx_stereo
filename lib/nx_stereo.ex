@@ -25,6 +25,7 @@ defmodule NxStereo do
   import Nx.Defn
 
   @census_bound 48
+  @census_windows [:sparse_9x7, :dense_9x5, :dense_9x5_blend]
   @defaults [disparities: 64, p1: 8, p2: 64, uniqueness: 1.0526315789473684, paths: 8]
   # Use as Nx.u32(@invalid_key): defn narrows untyped literals to s32
   @invalid_key 0xFFFFFFFF
@@ -155,14 +156,18 @@ defmodule NxStereo do
       Defaults to 4.
     * `:coarse_paths` - the coarse matching's paths, 3 or 8. Defaults to
       `:paths`.
+    * `:fine_census` - the fine descriptor, as `sgm_band/4`'s `:census`.
+      Defaults to `:sparse_9x7`; the coarse pass always keeps that descriptor.
 
   Images must have an even height and width.
   """
   deftransform sgm_coarse_to_fine(left, right, opts \\ []) do
     defaults =
-      Keyword.put(@defaults, :disparities, 128) ++ [band: 16, margin: 4, coarse_paths: nil]
+      Keyword.put(@defaults, :disparities, 128) ++
+        [band: 16, margin: 4, coarse_paths: nil, fine_census: :sparse_9x7]
 
     opts = Keyword.validate!(opts, defaults)
+    census_window!(opts[:fine_census], :fine_census)
 
     {height, width} = Nx.shape(left)
 
@@ -193,26 +198,22 @@ defmodule NxStereo do
       left,
       right,
       base,
-      [disparities: 128, paths: opts[:paths], band: opts[:band]] ++ penalties
+      [disparities: 128, paths: opts[:paths], band: opts[:band], census: opts[:fine_census]] ++
+        penalties
     )
   end
 
-  # Both images shrunk 2x, as shaders on Vulkan for s32 images
+  # The pair uses 32-bit pixels throughout its rounded 2x2 average.
   deftransformp shrink_pair(left, right) do
     {height, width} = Nx.shape(left)
+    half = Nx.template({div(height, 2), div(width, 2)}, :s32)
 
-    if Nx.type(left) == {:s, 32} do
-      half = Nx.template({div(height, 2), div(width, 2)}, :s32)
-
-      NxStereo.Kernels.block(
-        [left, right],
-        {half, half},
-        fn [left, right] -> {shrink(left), shrink(right)} end,
-        fn -> NxStereo.Vulkan.shrink_pipeline(height, width) end
-      )
-    else
-      {shrink(left), shrink(right)}
-    end
+    NxStereo.Kernels.block(
+      [Nx.as_type(left, :s32), Nx.as_type(right, :s32)],
+      {half, half},
+      fn [left, right] -> {shrink(left), shrink(right)} end,
+      fn -> NxStereo.Vulkan.shrink_pipeline(height, width) end
+    )
   end
 
   # The bases of band_base/3, as a shader on Vulkan
@@ -273,13 +274,22 @@ defmodule NxStereo do
 
   Takes `sgm/3`'s options and `:band`, 8, 16, 32 or 64; the caller keeps
   `base + band` within `:disparities`. Defaults to 16.
+
+  `:census` chooses the descriptor: `:sparse_9x7` (default) has 48 comparisons
+  outside the centre row and column; `:dense_9x5` has all 44 neighbours.
+  `:dense_9x5_blend` uses the dense window and averages its centre with its
+  rounded 3x3 Gaussian mean before comparison. The average is rounded too.
+  All ignore one-level differences. Dense descriptors can improve detail;
+  the blended centre reduces sensitivity to noise. Coverage and scene-level
+  accuracy still vary, so select the option using representative images.
   """
   deftransform sgm_band(left, right, base, opts \\ []) do
-    opts = Keyword.validate!(opts, @defaults ++ [band: 16])
+    opts = Keyword.validate!(opts, @defaults ++ [band: 16, census: :sparse_9x7])
+    census_window!(opts[:census], :census)
     band = opts[:band]
 
     {config, left, right, penalties, output} =
-      prepare!(left, right, Keyword.delete(opts, :band), "NxStereo.sgm_band/4")
+      prepare!(left, right, Keyword.drop(opts, [:band, :census]), "NxStereo.sgm_band/4")
 
     unless band in [8, 16, 32, 64] do
       raise ArgumentError, ":band must be 8, 16, 32 or 64, got #{inspect(band)}"
@@ -293,7 +303,7 @@ defmodule NxStereo do
               "got #{inspect(base_template.type)} #{inspect(base_template.shape)}"
     end
 
-    config = Map.put(config, :band, band)
+    config = config |> Map.put(:band, band) |> Map.put(:census, opts[:census])
 
     NxStereo.Kernels.block(
       [left, right, penalties, base],
@@ -308,7 +318,10 @@ defmodule NxStereo do
   defnp band_n(left, right, base, penalties, opts) do
     disparities = opts[:disparities]
     searched = Nx.max(base, 0)
-    costs = band_costs(census(left), census(right), searched, opts[:band])
+
+    costs =
+      band_costs(census(left, opts[:census]), census(right, opts[:census]), searched, opts[:band])
+
     sums = band_aggregate(costs, searched, penalties, opts)
     {disparity, keys} = band_select(sums, base, penalties, opts)
     disparity |> consistency(keys, disparities) |> NxStereo.Image.median(3)
@@ -466,22 +479,51 @@ defmodule NxStereo do
     disparity |> consistency(keys, disparities) |> NxStereo.Image.median(3)
   end
 
-  # 48 bits per pixel, one per neighbour of the 9x7 window outside the centre
-  # row and column, set where the neighbour is more than one level below the
-  # centre, so that sensor noise on flat surfaces does not flip bits. Borders
-  # are replicated.
-  deftransformp census(image) do
-    neighbours()
+  defp census_window!(window, key) do
+    unless window in @census_windows,
+      do:
+        raise(
+          ArgumentError,
+          ":#{key} must be one of #{inspect(@census_windows)}, got #{inspect(window)}"
+        )
+  end
+
+  # Neighbours more than one level below the anchor set a descriptor bit.
+  deftransformp census(image, window \\ :sparse_9x7) do
+    anchor = census_anchor(image, window)
+
+    neighbours(window)
     |> Enum.with_index()
     |> Enum.reduce(Nx.broadcast(Nx.u64(0), image), fn {{dy, dx}, bit}, acc ->
-      below = Nx.less(Nx.add(NxStereo.Image.shift(image, dy, dx), 1), image) |> Nx.as_type(:u64)
+      below = Nx.less(Nx.add(NxStereo.Image.shift(image, dy, dx), 1), anchor) |> Nx.as_type(:u64)
       Nx.bitwise_or(acc, Nx.left_shift(below, bit))
     end)
   end
 
-  defp neighbours do
+  defp neighbours(:sparse_9x7) do
     for dy <- -3..3, dy != 0, dx <- -4..4, dx != 0, do: {dy, dx}
   end
+
+  defp neighbours(_dense) do
+    for dy <- -2..2, dx <- -4..4, dy != 0 or dx != 0, do: {dy, dx}
+  end
+
+  deftransformp census_anchor(image, :dense_9x5_blend) do
+    weights = [{-1, 1}, {0, 2}, {1, 1}]
+
+    weighted =
+      for {dy, wy} <- weights,
+          {dx, wx} <- weights,
+          do: Nx.multiply(NxStereo.Image.shift(image, dy, dx), wy * wx)
+
+    weighted
+    |> Enum.reduce(&Nx.add/2)
+    |> Nx.add(Nx.multiply(image, 16))
+    |> Nx.add(24)
+    |> Nx.quotient(32)
+  end
+
+  deftransformp(census_anchor(image, _window), do: image)
 
   # costs[y, x, d] = popcount(left[y, x] ^ right[y, x - d]), right features
   # left of the image being zero

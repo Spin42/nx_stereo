@@ -1,0 +1,151 @@
+{
+  "comparison": "band32 margin8 dense_9x5_blend versus sparse_9x7; lower bad-or-missing and matched-pixel EPE",
+  "counts": {
+    "all": {
+      "both_improve": 252,
+      "pairs": 364,
+      "mixed_or_tied": 61,
+      "both_worsen": 51
+    },
+    "middlebury": {
+      "both_improve": 70,
+      "pairs": 105,
+      "mixed_or_tied": 19,
+      "both_worsen": 16
+    },
+    "middlebury/clean": {
+      "both_improve": 12,
+      "pairs": 15,
+      "mixed_or_tied": 1,
+      "both_worsen": 2
+    },
+    "middlebury/noise2": {
+      "both_improve": 11,
+      "pairs": 15,
+      "both_worsen": 2,
+      "mixed_or_tied": 2
+    },
+    "middlebury/noise4": {
+      "mixed_or_tied": 5,
+      "pairs": 15,
+      "both_improve": 8,
+      "both_worsen": 2
+    },
+    "middlebury/noise8": {
+      "mixed_or_tied": 5,
+      "pairs": 15,
+      "both_improve": 9,
+      "both_worsen": 1
+    },
+    "middlebury/gain0.8": {
+      "mixed_or_tied": 3,
+      "pairs": 15,
+      "both_improve": 9,
+      "both_worsen": 3
+    },
+    "middlebury/gain1.2": {
+      "both_improve": 12,
+      "pairs": 15,
+      "both_worsen": 3
+    },
+    "middlebury/blur_right": {
+      "both_worsen": 3,
+      "pairs": 15,
+      "mixed_or_tied": 3,
+      "both_improve": 9
+    },
+    "eth3d": {
+      "mixed_or_tied": 32,
+      "pairs": 189,
+      "both_worsen": 31,
+      "both_improve": 126
+    },
+    "eth3d/clean": {
+      "mixed_or_tied": 9,
+      "pairs": 27,
+      "both_worsen": 4,
+      "both_improve": 14
+    },
+    "eth3d/noise2": {
+      "both_worsen": 9,
+      "pairs": 27,
+      "both_improve": 15,
+      "mixed_or_tied": 3
+    },
+    "eth3d/noise4": {
+      "both_improve": 20,
+      "pairs": 27,
+      "mixed_or_tied": 5,
+      "both_worsen": 2
+    },
+    "eth3d/noise8": {
+      "both_improve": 23,
+      "pairs": 27,
+      "both_worsen": 1,
+      "mixed_or_tied": 3
+    },
+    "eth3d/gain0.8": {
+      "mixed_or_tied": 5,
+      "pairs": 27,
+      "both_improve": 16,
+      "both_worsen": 6
+    },
+    "eth3d/gain1.2": {
+      "both_worsen": 6,
+      "pairs": 27,
+      "mixed_or_tied": 4,
+      "both_improve": 17
+    },
+    "eth3d/blur_right": {
+      "both_improve": 21,
+      "pairs": 27,
+      "both_worsen": 3,
+      "mixed_or_tied": 3
+    },
+    "kitti": {
+      "mixed_or_tied": 10,
+      "pairs": 70,
+      "both_improve": 56,
+      "both_worsen": 4
+    },
+    "kitti/clean": {
+      "mixed_or_tied": 3,
+      "pairs": 10,
+      "both_improve": 6,
+      "both_worsen": 1
+    },
+    "kitti/noise2": {
+      "both_improve": 8,
+      "pairs": 10,
+      "mixed_or_tied": 1,
+      "both_worsen": 1
+    },
+    "kitti/noise4": {
+      "both_improve": 8,
+      "pairs": 10,
+      "mixed_or_tied": 1,
+      "both_worsen": 1
+    },
+    "kitti/noise8": {
+      "both_improve": 9,
+      "pairs": 10,
+      "mixed_or_tied": 1
+    },
+    "kitti/gain0.8": {
+      "mixed_or_tied": 2,
+      "pairs": 10,
+      "both_improve": 7,
+      "both_worsen": 1
+    },
+    "kitti/gain1.2": {
+      "both_improve": 9,
+      "pairs": 10,
+      "mixed_or_tied": 1
+    },
+    "kitti/blur_right": {
+      "both_improve": 9,
+      "pairs": 10,
+      "mixed_or_tied": 1
+    }
+  }
+}

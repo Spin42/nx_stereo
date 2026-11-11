@@ -1,16 +1,26 @@
-# Accuracy of NxStereo.sgm/3 on stereo datasets with ground truth and, on a
-# Vulkan device, how the shaders agree with the reference and their time per
-# frame. Datasets are downloaded into _build/bench.
+# Ground-truth quality and matcher timings. Datasets are cached in _build/bench.
 #
-#     mix run bench/datasets.exs [--datasets middlebury,eth3d,kitti] [--paths 3|8] [--device URI_SUBSTRING]
+#     mix run bench/datasets.exs --datasets middlebury,eth3d,kitti \
+#       --search coarse_to_fine --paths 8 --coarse-paths 3 --band 16 --margin 4 \
+#       --runs 20 --csv quality.csv
 #
-#   * middlebury (default): the 15 MiddEval3 training scenes at quarter
-#     resolution, non-occluded pixels, 45 MB.
-#   * eth3d: the 27 two-view training scenes, non-occluded pixels; needs 7z.
-#   * kitti: every 20th KITTI 2015 training pair at half resolution, 1.7 GB.
+# Other options: --search full, --disparities 64|128, --p1 8, --p2 64,
+# --uniqueness 1.0526315789473684, --warmup 3, --scene NAME_SUBSTRING,
+# --device URI_SUBSTRING and --no-reference (GPU quality without EXLA parity).
+# --perturbation clean|noise2|noise4|noise8|gain0.8|gain1.2|blur_right changes
+# the images before timing; geometric ground truth stays unchanged.
 #
-# Scenes whose ground truth exceeds 127 disparities are skipped. A pixel is
-# bad when it is more than 2 disparities off.
+# Middlebury: 15 quarter-resolution scenes, non-occluded truth, 45 MB.
+# ETH3D: 27 training scenes, non-occluded truth; needs 7z.
+# KITTI: every twentieth 2015 training pair at half resolution, 1.7 GB.
+#
+# An explicit disparity range scores all scenes, excluding unsupported truth
+# and reporting the fraction scored. Coarse-to-fine always uses 128 disparities
+# and crops odd dimensions. Full search without --disparities keeps automatic
+# 64/128 selection and skips scenes beyond that range. Bad means >2px error;
+# mean absolute error covers matched pixels. Summaries weight scenes equally.
+# GPU times include output download with resident inputs, after compilation
+# and warmup. They measure matching, not the complete camera pipeline.
 
 defmodule Bench.Datasets do
   @cache "_build/bench"
@@ -266,126 +276,333 @@ defmodule Bench.Datasets do
 end
 
 defmodule Bench do
-  def run(args) do
-    {opts, _} =
-      OptionParser.parse!(args, strict: [datasets: :string, device: :string, paths: :integer])
+  @moduledoc false
+  Code.require_file("support/quality.exs", __DIR__)
+  Code.require_file("support/compare.exs", __DIR__)
+  Code.require_file("support/options.exs", __DIR__)
+  Code.require_file("support/perturbation.exs", __DIR__)
 
+  @defaults [
+    datasets: "middlebury",
+    perturbation: "clean",
+    search: "full",
+    paths: 8,
+    coarse_paths: 3,
+    fine_census: "sparse_9x7",
+    band: 16,
+    margin: 4,
+    p1: 8,
+    p2: 64,
+    uniqueness: 1.0526315789473684,
+    runs: 10,
+    warmup: 3,
+    reference: true
+  ]
+  @switches [
+    datasets: :string,
+    perturbation: :string,
+    scene: :string,
+    device: :string,
+    search: :string,
+    disparities: :integer,
+    paths: :integer,
+    coarse_paths: :integer,
+    fine_census: :string,
+    band: :integer,
+    margin: :integer,
+    p1: :integer,
+    p2: :integer,
+    uniqueness: :float,
+    runs: :integer,
+    warmup: :integer,
+    reference: :boolean,
+    csv: :string
+  ]
+  @loaders %{
+    "middlebury" => &Bench.Datasets.middlebury/0,
+    "eth3d" => &Bench.Datasets.eth3d/0,
+    "kitti" => &Bench.Datasets.kitti/0
+  }
+  @rates [:scored, :matched, :bad, :bad_or_missing]
+
+  def run(args) do
+    {opts, []} = OptionParser.parse!(args, strict: @switches)
+    opts = @defaults |> Keyword.merge(opts) |> Bench.Options.fine_census()
+    validate!(opts)
+    Bench.Perturbation.validate!(opts[:perturbation])
     Nx.default_backend(EXLA.Backend)
     device = device(opts[:device])
 
-    if device,
-      do: IO.puts("Vulkan device: #{device.uri}"),
-      else: IO.puts("No Vulkan device: reference only")
+    IO.puts(
+      if device, do: "Vulkan device: #{device.uri}", else: "No Vulkan device: reference only"
+    )
 
-    datasets = opts |> Keyword.get(:datasets, "middlebury") |> String.split(",")
+    IO.puts(
+      "Settings: #{inspect(Keyword.take(opts, [:search, :disparities, :paths, :coarse_paths, :band, :margin, :fine_census, :p1, :p2, :uniqueness]))}"
+    )
 
-    for dataset <- datasets, dataset not in ~w(middlebury eth3d kitti) do
-      Mix.raise("unknown dataset #{dataset}, expected middlebury, eth3d or kitti")
-    end
+    IO.puts("Image condition: #{opts[:perturbation]}")
 
-    header =
-      ["dataset", "scene", "size", "D", "matched", "bad", "bad or missing"] ++
-        if(device, do: ["GPU decisions differing", "GPU ms/frame"], else: [])
+    IO.puts(
+      "GPU timings: resident inputs, output download, #{opts[:warmup]} warmups, #{opts[:runs]} measured runs"
+    )
 
     rows =
-      for dataset <- datasets,
-          {scene, left, right, gt} <- apply(Bench.Datasets, String.to_atom(dataset), []),
-          row = scene_row(dataset, scene, left, right, gt, device, Keyword.get(opts, :paths, 8)),
+      for dataset <- String.split(opts[:datasets], ","),
+          {scene, left, right, truth} <- Map.fetch!(@loaders, dataset).(),
+          opts[:scene] == nil or String.contains?(scene, opts[:scene]),
+          row = scene_row(dataset, scene, left, right, truth, device, opts),
           row != nil,
           do: row
 
-    print([header | Enum.map(rows, &elem(&1, 0))])
+    if rows == [], do: Mix.raise("no scenes selected")
 
-    summary =
-      for {dataset, scenes} <- Enum.group_by(rows, &elem(&1, 1)) do
-        metrics = Enum.map(scenes, &elem(&1, 2))
+    header = [
+      "dataset",
+      "scene",
+      "size",
+      "D",
+      "scored",
+      "matched",
+      "bad >2px",
+      "bad or missing",
+      "MAE px",
+      "GPU differing",
+      "GPU median ms",
+      "GPU p90 ms"
+    ]
 
-        mean = fn i ->
-          metrics |> Enum.map(&elem(&1, i)) |> Enum.sum() |> Kernel./(length(metrics))
-        end
-
-        [
-          dataset,
-          "#{length(metrics)} scenes",
-          percent(mean.(0)),
-          percent(mean.(1)),
-          percent(mean.(2))
-        ]
-      end
-
-    IO.puts("")
-    print([["dataset", "", "matched", "bad", "bad or missing"] | summary])
+    print([header | Enum.map(rows, &table_row/1)])
+    print_summary(rows)
+    if opts[:csv], do: write_csv(opts[:csv], rows)
   end
 
-  defp scene_row(dataset, scene, left, right, gt, device, paths) do
-    {h, w} = Nx.shape(left)
-    top = gt |> Nx.reduce_max() |> Nx.to_number()
+  defp validate!(opts) do
+    unless opts[:search] in ["full", "coarse_to_fine"],
+      do: Mix.raise("--search must be full or coarse_to_fine")
 
-    disparities =
-      cond do
-        top < 63 -> 64
-        top < 127 -> 128
-        true -> nil
-      end
+    unless opts[:disparities] in [nil, 64, 128], do: Mix.raise("--disparities must be 64 or 128")
+
+    if opts[:search] == "coarse_to_fine" and opts[:disparities] == 64,
+      do: Mix.raise("coarse_to_fine needs 128 disparities")
+
+    unless opts[:runs] > 0 and opts[:warmup] >= 0,
+      do: Mix.raise("--runs must be positive and --warmup nonnegative")
+
+    unless opts[:band] in [8, 16, 32, 64] and opts[:margin] >= 0 and opts[:margin] < opts[:band],
+      do: Mix.raise("use band 8, 16, 32 or 64 and 0 <= margin < band")
+
+    for dataset <- String.split(opts[:datasets], ","),
+        not Map.has_key?(@loaders, dataset),
+        do: Mix.raise("unknown dataset #{dataset}")
+  end
+
+  defp scene_row(dataset, scene, left, right, truth, device, opts) do
+    {left, right, truth} = prepare_pair(left, right, truth, opts[:search])
+    {left, right} = Bench.Perturbation.apply(left, right, opts[:perturbation])
+    {height, width} = Nx.shape(left)
+    disparities = disparities(truth, opts)
 
     if disparities == nil do
-      IO.puts("skipping #{dataset} #{scene}: ground truth reaches #{round(top)} disparities")
+      IO.puts(
+        "skipping #{dataset} #{scene}: use --disparities 128 to score its supported ground truth"
+      )
+
       nil
     else
-      fun = &NxStereo.sgm(&1, &2, disparities: disparities, paths: paths)
-      reference = Nx.Defn.jit(fun, compiler: EXLA).(left, right)
-      metrics = score(reference, gt)
+      fun = matcher(disparities, opts)
 
-      gpu =
+      reference =
+        if device == nil or opts[:reference], do: Nx.Defn.jit(fun, compiler: EXLA).(left, right)
+
+      {output, differing, median, p90} =
         if device do
-          jitted =
-            Nx.Defn.jit(fun, compiler: NxIREE.Compiler, iree_runtime_options: [device: device])
-
-          frame = fn -> jitted.(left, right) |> Nx.backend_transfer(EXLA.Backend) end
-          output = frame.()
-          times = for _ <- 1..5, do: elem(:timer.tc(frame), 0) / 1000
-
-          [
-            Integer.to_string(differing(reference, output)),
-            :erlang.float_to_binary(median(times), decimals: 1)
-          ]
+          measure_gpu(fun, left, right, reference, device, opts)
         else
-          []
+          {reference, nil, nil, nil}
         end
 
-      {[dataset, scene, "#{w}x#{h}", Integer.to_string(disparities)] ++
-         Enum.map(Tuple.to_list(metrics), &percent/1) ++ gpu, dataset, metrics}
+      Bench.Quality.score(output, truth, disparities)
+      |> Map.merge(%{
+        dataset: dataset,
+        scene: scene,
+        width: width,
+        height: height,
+        disparities: disparities,
+        device: if(device, do: device.uri, else: "EXLA"),
+        differing: differing,
+        gpu_median_ms: median,
+        gpu_p90_ms: p90
+      })
+      |> Map.merge(
+        opts
+        |> Keyword.take([
+          :search,
+          :perturbation,
+          :paths,
+          :coarse_paths,
+          :fine_census,
+          :band,
+          :margin,
+          :p1,
+          :p2,
+          :uniqueness,
+          :warmup,
+          :runs
+        ])
+        |> Map.new()
+      )
     end
   end
 
-  defp score(disparity, gt) do
-    known = Nx.greater_equal(gt, 0)
-    valid = Nx.logical_and(known, Nx.greater_equal(disparity, 0))
-    bad = Nx.greater(Nx.abs(Nx.subtract(disparity, gt)), 2)
-    count = fn t -> t |> Nx.sum() |> Nx.to_number() end
-    {known_n, valid_n} = {count.(known), count.(valid)}
+  defp prepare_pair(left, right, truth, "full"), do: {left, right, truth}
 
-    {valid_n / known_n, count.(Nx.logical_and(valid, bad)) / max(valid_n, 1),
-     count.(Nx.logical_and(known, Nx.logical_or(bad, Nx.logical_not(valid)))) / known_n}
+  defp prepare_pair(left, right, truth, "coarse_to_fine") do
+    {height, width} = Nx.shape(left)
+    shape = [div(height, 2) * 2, div(width, 2) * 2]
+    [left, right, truth] = Enum.map([left, right, truth], &Nx.slice(&1, [0, 0], shape))
+    {left, right, truth}
   end
 
-  # Pixels where the shaders and the reference disagree on validity or on the
-  # integer disparity; subpixel values may differ in their last bit.
-  defp differing(a, b) do
-    validity = Nx.not_equal(Nx.greater_equal(a, 0), Nx.greater_equal(b, 0))
-    integer = Nx.logical_and(Nx.greater_equal(a, 0), Nx.not_equal(Nx.floor(a), Nx.floor(b)))
-    Nx.logical_or(validity, integer) |> Nx.sum() |> Nx.to_number()
+  defp disparities(truth, opts) do
+    cond do
+      opts[:search] == "coarse_to_fine" ->
+        128
+
+      opts[:disparities] != nil ->
+        opts[:disparities]
+
+      true ->
+        top = truth |> Nx.reduce_max() |> Nx.to_number()
+
+        cond do
+          top < 63 -> 64
+          top < 127 -> 128
+          true -> nil
+        end
+    end
+  end
+
+  defp matcher(disparities, opts) do
+    matching = [disparities: disparities] ++ Keyword.take(opts, [:paths, :p1, :p2, :uniqueness])
+
+    case opts[:search] do
+      "full" ->
+        &NxStereo.sgm(&1, &2, matching)
+
+      "coarse_to_fine" ->
+        matching = matching ++ Keyword.take(opts, [:coarse_paths, :band, :margin, :fine_census])
+        &NxStereo.sgm_coarse_to_fine(&1, &2, matching)
+    end
+  end
+
+  defp measure_gpu(fun, left, right, reference, device, opts) do
+    compiled = Nx.Defn.jit(fun, compiler: NxIREE.Compiler, iree_runtime_options: [device: device])
+
+    [left, right] =
+      Enum.map([left, right], &Nx.backend_copy(&1, {NxIREE.Backend, device: device}))
+
+    frame = fn -> compiled.(left, right) |> Nx.backend_transfer(EXLA.Backend) end
+    output = frame.()
+    Enum.each(List.duplicate(nil, opts[:warmup]), fn _ -> frame.() end)
+    times = for _ <- 1..opts[:runs], do: elem(:timer.tc(frame), 0) / 1000
+    differing = if reference, do: Bench.Compare.disparity(reference, output)
+    {output, differing, percentile(times, 0.5), percentile(times, 0.9)}
   end
 
   defp device(filter) do
-    if Code.ensure_loaded?(NxIREE) do
-      {:ok, devices} = NxIREE.list_devices("vulkan")
-      Enum.find(devices, &String.contains?(&1.uri, filter || ""))
-    end
+    found =
+      if Code.ensure_loaded?(NxIREE) do
+        {:ok, devices} = NxIREE.list_devices("vulkan")
+        Enum.find(devices, &String.contains?(&1.uri, filter || ""))
+      end
+
+    if filter && found == nil, do: Mix.raise("no Vulkan device matches #{inspect(filter)}")
+    found
   end
 
-  defp median(values), do: values |> Enum.sort() |> Enum.at(div(length(values), 2))
-  defp percent(value), do: :erlang.float_to_binary(value * 100, decimals: 1) <> "%"
+  defp table_row(row) do
+    [row.dataset, row.scene, "#{row.width}x#{row.height}", to_string(row.disparities)] ++
+      Enum.map(@rates, &percent(row[&1])) ++
+      Enum.map(
+        [row.mean_absolute_error, row.differing, row.gpu_median_ms, row.gpu_p90_ms],
+        &number/1
+      )
+  end
+
+  defp print_summary(rows) do
+    summary =
+      for {dataset, scenes} <- rows |> Enum.group_by(& &1.dataset) |> Enum.sort() do
+        [dataset, "#{length(scenes)} scenes"] ++
+          Enum.map(@rates, &percent(mean(scenes, &1))) ++
+          [number(mean(scenes, :mean_absolute_error))]
+      end
+
+    IO.puts("\nEqual scene-weighted means:")
+
+    print([
+      ["dataset", "", "scored", "matched", "bad >2px", "bad or missing", "MAE px"] | summary
+    ])
+  end
+
+  defp mean(rows, key) do
+    scores = rows |> Enum.map(& &1[key]) |> Enum.reject(&is_nil/1)
+    if scores != [], do: Enum.sum(scores) / length(scores)
+  end
+
+  defp write_csv(path, rows) do
+    columns = [
+      :dataset,
+      :scene,
+      :width,
+      :height,
+      :disparities,
+      :search,
+      :perturbation,
+      :paths,
+      :coarse_paths,
+      :fine_census,
+      :band,
+      :margin,
+      :p1,
+      :p2,
+      :uniqueness,
+      :warmup,
+      :runs,
+      :device,
+      :truth_pixels,
+      :scored_pixels,
+      :matched_pixels,
+      :scored,
+      :matched,
+      :bad,
+      :bad_or_missing,
+      :mean_absolute_error,
+      :differing,
+      :gpu_median_ms,
+      :gpu_p90_ms
+    ]
+
+    csv = [
+      Enum.map_join(columns, ",", &to_string/1)
+      | Enum.map(rows, fn row -> Enum.map_join(columns, ",", &csv_cell(row[&1])) end)
+    ]
+
+    File.write!(path, Enum.join(csv, "\n") <> "\n")
+    IO.puts("CSV: #{path}")
+  end
+
+  defp csv_cell(nil), do: ""
+  defp csv_cell(cell), do: "\"" <> String.replace(to_string(cell), "\"", "\"\"") <> "\""
+
+  defp percentile(values, fraction),
+    do: values |> Enum.sort() |> Enum.at(max(0, ceil(length(values) * fraction) - 1))
+
+  defp number(nil), do: "-"
+  defp number(value) when is_integer(value), do: Integer.to_string(value)
+  defp number(value), do: :erlang.float_to_binary(value, decimals: 3)
+  defp percent(nil), do: "-"
+  defp percent(value), do: :erlang.float_to_binary(value * 100, decimals: 2) <> "%"
 
   defp print(rows) do
     widths =

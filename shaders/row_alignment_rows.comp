@@ -1,5 +1,5 @@
 #version 450
-// NxStereo.Diagnostics.row_alignment_sums/4 for one sampled row, every
+// NxStereo.Diagnostics.row_alignment_sums/4 for one band of a sampled row, every
 // ROW_STEP-th: for each matched pixel of the band-covered columns, |right - left| with the
 // right pixel at its disparity on the rows REACH above to REACH below,
 // summed per band and row offset, then the matched count, exactly in
@@ -28,39 +28,41 @@ int right_pixel(int i) { return int((right_words[i >> 2] >> ((i & 3) * 8)) & 255
 layout(set = 0, binding = 2) readonly buffer Disparity { float disparity[]; };
 layout(set = 0, binding = 3) writeonly buffer Partials { float partials[]; };
 
-shared uint sums[BANDS * PLANES][GROUP];
+shared uint sums[PLANES][GROUP];
 
 void main() {
   int sampled = int(gl_WorkGroupID.x);
+  int band = int(gl_WorkGroupID.y);
   int y = sampled * ROW_STEP;
   uint t = gl_LocalInvocationID.x;
   int band_width = WIDTH / BANDS;
 
-  uint acc[BANDS * PLANES];
-  for (int k = 0; k < BANDS * PLANES; ++k) acc[k] = 0u;
+  uint acc[PLANES];
+  for (int k = 0; k < PLANES; ++k) acc[k] = 0u;
 
-  for (int x = int(t); x < band_width * BANDS; x += GROUP) {
+  for (int col = int(t); col < band_width; col += GROUP) {
+    int x = band * band_width + col;
     int i = y * WIDTH + x;
     float d = disparity[i];
     if (!(d > 0.0)) continue;
-    int band = x / band_width;
     // Nx.round rounds halves away from zero; d is positive.
     int source = clamp(x - int(floor(d + 0.5)), 0, WIDTH - 1);
     int l = left_pixel(i);
     for (int o = -REACH; o <= REACH; ++o) {
       int row = clamp(y + o, 0, HEIGHT - 1);
-      acc[band * PLANES + o + REACH] += uint(abs(right_pixel(row * WIDTH + source) - l));
+      acc[o + REACH] += uint(abs(right_pixel(row * WIDTH + source) - l));
     }
-    acc[band * PLANES + PLANES - 1] += 1u;
+    acc[PLANES - 1] += 1u;
   }
 
-  for (int k = 0; k < BANDS * PLANES; ++k) sums[k][t] = acc[k];
+  for (int k = 0; k < PLANES; ++k) sums[k][t] = acc[k];
   barrier();
   for (uint stride = GROUP / 2; stride > 0u; stride >>= 1) {
     if (t < stride) {
-      for (int k = 0; k < BANDS * PLANES; ++k) sums[k][t] += sums[k][t + stride];
+      for (int k = 0; k < PLANES; ++k) sums[k][t] += sums[k][t + stride];
     }
     barrier();
   }
-  if (t < uint(BANDS * PLANES)) partials[sampled * BANDS * PLANES + int(t)] = float(sums[t][0]);
+  if (t < uint(PLANES))
+    partials[(sampled * BANDS + band) * PLANES + int(t)] = float(sums[t][0]);
 }
