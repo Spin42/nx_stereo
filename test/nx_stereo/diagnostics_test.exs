@@ -24,6 +24,15 @@ defmodule NxStereo.DiagnosticsTest do
     assert flat == 0.0
   end
 
+  test "brightness is each image's mean grey over the pixels sharpness counts, 0 without any" do
+    left = Nx.tensor([[10, 20, 10], [10, 10, 10]], type: :u8)
+    right = Nx.broadcast(Nx.u8(0), {2, 3})
+    sums = Nx.Defn.jit(&Diagnostics.sharpness_sums/2).(left, right)
+
+    # Left: the left pixels of the counted pairs, 10, 20, 10 and 10.
+    assert Diagnostics.brightness(sums) == %{left: 12.5, right: 0.0}
+  end
+
   test "sharpness leaves out pairs with a black pixel and reads 0 without any" do
     left = Nx.tensor([[0, 200, 0, 10, 20]], type: :u8)
     right = Nx.broadcast(Nx.u8(0), {1, 5})
