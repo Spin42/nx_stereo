@@ -1,0 +1,249 @@
+{
+  "measurement_date_utc": "2026-11-11",
+  "scope": "Local Intel Vulkan measurements; no Arduino measurements in this optimization pass.",
+  "source_base": "eb19f7cf8a23ad8a0e9c5313f43bb78adbfe18c2",
+  "nx_iree_revision": "031131b3804088248bd3810136b26102d819e127",
+  "iree_source_revision": "89ece87b89852100c0a4ac3d515e14842d090967",
+  "iree_compiler_version": "3.13.0rc20261016",
+  "gpu": "Intel Iris Xe Graphics (RPL-P)",
+  "driver": "Mesa 26.0.8",
+  "device_uri": "vulkan://GPU-8680a0a7040000000002000000000000",
+  "vulkan_validation_layers": "1.4.341.0-1",
+  "runtime_environment": {
+    "MIX_ENV": "test",
+    "ERL_FLAGS": "+S 8:8",
+    "TMPDIR": "a distinct existing directory for each concurrent BEAM process"
+  },
+  "stream": {
+    "working_height": 544,
+    "working_width": 728,
+    "frame_height": 1088,
+    "frame_width": 1456,
+    "disparities": 128,
+    "fine_paths": 8,
+    "packed_uploads": true,
+    "sequence_frames": 8,
+    "sequence_working_disparities": [
+      31,
+      32,
+      33,
+      31,
+      32,
+      33,
+      31,
+      32
+    ],
+    "cloud_decimation": 4,
+    "published_outputs": "all",
+    "carried_state": "propagated between frames",
+    "sustained_rounds": 20,
+    "timed_frames_per_round_per_mode": 1200,
+    "warmup_frames_per_round_per_mode": 24,
+    "modes": [
+      "serial",
+      "overlap"
+    ],
+    "mode_order": "alternates each round",
+    "excluded": [
+      "compilation",
+      "fixture generation",
+      "warm-up",
+      "camera capture",
+      "display"
+    ],
+    "profiles": [
+      {
+        "label": "b16_c3_sparse",
+        "band": 16,
+        "margin": 4,
+        "coarse_paths": 3,
+        "fine_census": "sparse_9x7"
+      },
+      {
+        "label": "b16_c8_blend",
+        "band": 16,
+        "margin": 2,
+        "coarse_paths": 8,
+        "fine_census": "dense_9x5_blend"
+      },
+      {
+        "label": "b32_c8_blend",
+        "band": 32,
+        "margin": 8,
+        "coarse_paths": 8,
+        "fine_census": "dense_9x5_blend"
+      }
+    ]
+  },
+  "quality": {
+    "datasets": {
+      "middlebury": "15 MiddEval3 training scenes, quarter resolution, non-occluded truth",
+      "eth3d": "27 training scenes, non-occluded truth",
+      "kitti": "every twentieth KITTI 2015 training pair, 10 pairs at half resolution"
+    },
+    "geometry": "cropped to even dimensions",
+    "scored_ground_truth": "finite disparities >=0 and <128",
+    "conditions": [
+      "clean",
+      "noise2",
+      "noise4",
+      "noise8",
+      "gain0.8",
+      "gain1.2",
+      "blur_right"
+    ],
+    "scene_summary_weight": "equal",
+    "bad_threshold_pixels": 2,
+    "bad_threshold_comparison": "strictly greater",
+    "mean_absolute_error": "matched pixels only; evaluate together with coverage and bad-or-missing rate",
+    "p1": 8,
+    "p2": 64,
+    "uniqueness": 1.0526315789473684,
+    "coarse_paths": 8,
+    "fine_paths": 8,
+    "saved_rows_rechecked_through_public_api": 2184,
+    "boundary_checks": {
+      "conditions": [
+        "clean",
+        "noise4"
+      ],
+      "profiles": 6,
+      "rows": 1248,
+      "paired_regions_reconstruct_prior_metrics": 624,
+      "max_reconstruction_epe_difference_px": 6.738181230758755e-07,
+      "definition": "valid adjacent ground-truth disparity difference >2 px; 5x5 dilation; only known in-range truth scored",
+      "known_boundary_pixels": {
+        "middlebury": 349405,
+        "eth3d": 328,
+        "kitti": 0
+      }
+    },
+    "penalty_sweep": {
+      "settings": [
+        [
+          6,
+          48
+        ],
+        [
+          8,
+          48
+        ],
+        [
+          8,
+          64
+        ],
+        [
+          8,
+          79
+        ],
+        [
+          10,
+          64
+        ],
+        [
+          10,
+          79
+        ]
+      ],
+      "rows": 1248,
+      "live_parameter_exla_vulkan_controls": 24,
+      "default_rows_reproduce_prior_public_metrics": 208
+    },
+    "penalty_refinement": {
+      "settings": [
+        [
+          8,
+          64
+        ],
+        [
+          9,
+          56
+        ],
+        [
+          9,
+          60
+        ],
+        [
+          9,
+          64
+        ],
+        [
+          10,
+          56
+        ],
+        [
+          10,
+          60
+        ]
+      ],
+      "rows": 1248,
+      "live_parameter_exla_vulkan_controls": 24,
+      "default_rows_reproduce_prior_public_metrics": 208
+    },
+    "uniqueness_sweep": {
+      "settings": [
+        [
+          8,
+          64,
+          1.0526315789473684
+        ],
+        [
+          8,
+          64,
+          1.03
+        ],
+        [
+          9,
+          56,
+          1.04
+        ],
+        [
+          9,
+          56,
+          1.03
+        ],
+        [
+          10,
+          60,
+          1.04
+        ],
+        [
+          10,
+          60,
+          1.03
+        ]
+      ],
+      "rows": 1248,
+      "live_parameter_exla_vulkan_controls": 24,
+      "default_rows_reproduce_prior_public_metrics": 208
+    }
+  },
+  "partition_experiment": {
+    "working_sizes_height_width": [
+      [
+        544,
+        728
+      ],
+      [
+        576,
+        768
+      ],
+      [
+        600,
+        800
+      ],
+      [
+        720,
+        960
+      ]
+    ],
+    "rounds": 4,
+    "frames_per_mode_per_round": 150,
+    "all_outputs_and_carry_verified_frames_per_mode": 16,
+    "status": "fixed-chain research prototype; production NxSegment API unchanged",
+    "threshold_case_scratch_bytes": [
+      69009664,
+      64585792
+    ]
+  }
+}
