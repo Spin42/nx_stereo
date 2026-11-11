@@ -8,7 +8,8 @@ defmodule NxStereo.NxSegment do
   the tensors its stages fill, but those they keep on the device
   (`c:NxStereo.Stage.device_only/0`). Outputs are published as one `u32`
   tensor and come back to the CPU in one download, since each device
-  transfer has a fixed cost; `collect/3` unbundles them.
+  transfer has a fixed cost; `collect/3` unbundles them as BinaryBackend views,
+  independent of the globally configured backend.
 
   It is compiled at the geometry's size with the `:defn_options` of its
   build options (`build/3`). Two of them are the segment's own:
@@ -21,7 +22,8 @@ defmodule NxStereo.NxSegment do
   The values the stages carry from one pair to the next
   (`c:NxStereo.Stage.carry/2`) stay on the device, in the segment
   `response/3` returns. On an `NxIREE` device the inputs stay there
-  between pairs too.
+  between pairs too. Uploading external tensors keeps the caller's source
+  buffers valid, including calibration reused during a reload.
 
   `send_request/2` runs the function in a `Task`; `collect/3` downloads
   the outputs in a `Task` of its own, so a pair's download overlaps the
@@ -187,7 +189,7 @@ defmodule NxStereo.NxSegment do
   defp place(container, placement) do
     Nx.Defn.Composite.traverse(container, fn
       %Nx.Tensor{data: %NxIREE.Backend{}} = tensor -> tensor
-      %Nx.Tensor{} = tensor -> Nx.backend_transfer(tensor, placement)
+      %Nx.Tensor{} = tensor -> Nx.backend_copy(tensor, placement)
     end)
   end
 
@@ -353,8 +355,8 @@ defmodule NxStereo.NxSegment do
 
   @doc """
   Downloads `outputs` from the device, freeing them there, in a `Task`
-  that has `timeout` ms: the outputs on the CPU, packed images unpacked
-  to `u8`; or what the download raised, or `:timeout`.
+  that has `timeout` ms: BinaryBackend views on the CPU, with packed images
+  unpacked to `u8`; or what the download raised, or `:timeout`.
   """
   @impl NxStereo.Segment
   @spec collect(map(), t(), timeout()) :: {:ok, map()} | {:error, term()} | :timeout
@@ -388,7 +390,12 @@ defmodule NxStereo.NxSegment do
   defp unbundle(binary, layout) do
     for {key, shape, {_kind, bits} = type, offset} <- layout do
       bytes = div(Tuple.product(shape) * bits, 8)
-      {key, binary |> binary_part(offset * 4, bytes) |> Nx.from_binary(type) |> Nx.reshape(shape)}
+
+      {key,
+       binary
+       |> binary_part(offset * 4, bytes)
+       |> Nx.from_binary(type, backend: Nx.BinaryBackend)
+       |> Nx.reshape(shape)}
     end
   end
 
