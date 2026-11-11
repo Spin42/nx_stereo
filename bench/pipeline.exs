@@ -5,7 +5,7 @@
 #
 #     mix run bench/pipeline.exs [--size 544x728] [--frame 1088x1456]
 #       [--search full|coarse_to_fine] [--disparities 64|128] [--paths 3|8]
-#       [--coarse-paths 3|8] [--band 16] [--packed] [--kernels] [--runs 20]
+#       [--coarse-paths 3|8] [--band 16] [--margin 4] [--packed] [--kernels] [--runs 20]
 #       [--device URI_SUBSTRING]
 #
 # Each stage is compiled alone and its inputs are on the device, so a
@@ -13,7 +13,7 @@
 # call itself. "Call" is the time of a call that does nothing, the part of
 # each stage's time no kernel can remove. "Chain" runs the stages as one
 # NxStereo.NxSegment, as an application does: their settings as inputs, the
-# band at its default width, the outputs in one download. Times are medians,
+# configured band and margin, the outputs in one download. Times are medians,
 # in milliseconds.
 #
 # --kernels also lists, under each stage, the time of each of its Vulkan
@@ -26,6 +26,10 @@
 # GPU without 8-bit storage receives them. "Differing" counts the elements
 # of a stage's output that differ from EXLA's by more than its tolerance,
 # given the same inputs.
+
+Code.require_file("support/scene.exs", __DIR__)
+Code.require_file("support/options.exs", __DIR__)
+Code.require_file("support/compare.exs", __DIR__)
 
 defmodule Bench.Kernels do
   @moduledoc false
@@ -167,7 +171,7 @@ defmodule Bench.Kernels do
 end
 
 defmodule Bench.Pipeline do
-  alias NxStereo.{Depth, Diagnostics, Filter, NxSegment, Packing, Rectify, Segment, Stage}
+  alias NxStereo.{Depth, Diagnostics, Filter, NxSegment, Rectify, Segment}
 
   @defaults [
     size: "544x728",
@@ -176,8 +180,11 @@ defmodule Bench.Pipeline do
     disparities: 128,
     paths: 8,
     coarse_paths: 3,
+    fine_census: "sparse_9x7",
     band: 16,
+    margin: 4,
     packed: false,
+    cloud_decimation: 4,
     kernels: false,
     runs: 20,
     device: ""
@@ -193,16 +200,20 @@ defmodule Bench.Pipeline do
           disparities: :integer,
           paths: :integer,
           coarse_paths: :integer,
+          fine_census: :string,
           band: :integer,
+          margin: :integer,
           packed: :boolean,
+          cloud_decimation: :integer,
           kernels: :boolean,
           runs: :integer,
           device: :string
         ]
       )
 
-    opts = Keyword.merge(@defaults, opts)
+    opts = @defaults |> Keyword.merge(opts) |> Bench.Options.fine_census()
     {height, width} = size = dimensions(opts[:size])
+    opts = Bench.Options.cloud_decimation(opts, size)
     frame_size = if opts[:frame], do: dimensions(opts[:frame]), else: {height * 2, width * 2}
     {:ok, devices} = NxIREE.list_devices("vulkan")
 
@@ -214,7 +225,7 @@ defmodule Bench.Pipeline do
     )
 
     gpu = [compiler: NxIREE.Compiler, iree_runtime_options: [device: device]]
-    inputs = inputs(frame_size, size, opts)
+    inputs = Bench.Scene.inputs(frame_size, size, opts)
     stages = stages(size, opts)
 
     {rows, _outputs} =
@@ -225,7 +236,13 @@ defmodule Bench.Pipeline do
         output = apply(compiled, on_device)
         ms = median_ms(fn -> apply(compiled, on_device) end, opts[:runs])
         reference = apply(Nx.Defn.jit(fun, compiler: EXLA), args)
-        differing = differing(Nx.backend_transfer(output, Nx.BinaryBackend), reference, tolerance)
+
+        differing =
+          Bench.Compare.relative(
+            Nx.backend_transfer(output, Nx.BinaryBackend),
+            reference,
+            tolerance
+          )
 
         kernels =
           if opts[:kernels],
@@ -264,52 +281,6 @@ defmodule Bench.Pipeline do
     {height, width}
   end
 
-  # A textured pair at frame size whose right frame sees the left one shifted, and the carried state.
-  defp inputs({frame_height, frame_width}, {height, width}, opts) do
-    shift = div(opts[:disparities], 4) * div(frame_width, width)
-
-    {texture, _key} =
-      Nx.Random.randint(Nx.Random.key(1), 0, 256,
-        shape: {frame_height, frame_width + shift},
-        type: :s32
-      )
-
-    texture = Nx.as_type(texture, :u8)
-    left = texture[[.., 0..(frame_width - 1)]]
-    right = texture[[.., shift..(frame_width + shift - 1)]]
-
-    frame = fn image ->
-      if opts[:packed],
-        do: Packing.pack(Nx.to_binary(image), frame_width, frame_height),
-        else: image
-    end
-
-    {fx, cx, cy} = {width * 0.6, width / 2, height / 2}
-    k = [fx, 0.0, cx, 0.0, fx, cy, 0.0, 0.0, 1.0]
-    identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
-    p = [fx, 0.0, cx, 0.0, 0.0, fx, cy, 0.0, 0.0, 0.0, 1.0, 0.0]
-    camera = Rectify.camera(k, [-0.05, 0.01], identity, p)
-    unmatched = Nx.broadcast(Nx.f32(-1.0), {height, width})
-
-    %{
-      left_frame: frame.(left),
-      right_frame: frame.(right),
-      camera: camera,
-      previous: unmatched,
-      missed: Nx.broadcast(Nx.f32(0.0), {height, width}),
-      settings: Nx.tensor([fx, cx, cy, 0.2], type: :f32),
-      left_image: left,
-      right_image: right,
-      geometry: %{
-        focal_length_px: fx,
-        baseline_m: 0.2,
-        principal_point: {cx, cy},
-        left_camera: camera,
-        right_camera: camera
-      }
-    }
-  end
-
   # {name, function, its inputs by name, the largest difference from EXLA that counts as equal}.
   defp stages(size, opts) do
     rectify =
@@ -325,7 +296,13 @@ defmodule Bench.Pipeline do
           &NxStereo.sgm_coarse_to_fine(
             &1,
             &2,
-            match_opts ++ [coarse_paths: opts[:coarse_paths], band: opts[:band]]
+            match_opts ++
+              [
+                coarse_paths: opts[:coarse_paths],
+                band: opts[:band],
+                margin: opts[:margin],
+                fine_census: opts[:fine_census]
+              ]
           ),
         else: &NxStereo.sgm(&1, &2, match_opts)
 
@@ -337,8 +314,9 @@ defmodule Bench.Pipeline do
       {:filtered, &(Filter.temporal(&1, &2, &3) |> elem(0)), [:despeckled, :previous, :missed],
        1.0e-4},
       {:depth_m, &(Depth.depth(&1, &2[0], &2[3]) |> elem(1)), [:filtered, :settings], 1.0e-4},
-      {:cloud, &(Depth.point_cloud(&1, &2[0], &2[1], &2[2], decimation: 4) |> elem(0)),
-       [:depth_m, :settings], 1.0e-4},
+      {:cloud,
+       &(Depth.point_cloud(&1, &2[0], &2[1], &2[2], decimation: opts[:cloud_decimation])
+         |> elem(0)), [:depth_m, :settings], 1.0e-4},
       {:sharpness_sums, &Diagnostics.sharpness_sums/2, [:left, :right], 1.0e-3},
       {:row_alignment_sums, &Diagnostics.row_alignment_sums/3, [:left, :right, :filtered],
        1.0e-3},
@@ -349,33 +327,13 @@ defmodule Bench.Pipeline do
   # The time of a pair through every stage as one NxStereo.NxSegment, as an application
   # compiles them: the stages' settings as inputs, their outputs in one download.
   defp segment_ms(inputs, {height, width}, {frame_height, frame_width}, opts, gpu) do
-    disparity =
-      [num_disparities: opts[:disparities], paths: opts[:paths], search: opts[:search]] ++
-        if(opts[:search] == "coarse_to_fine", do: [coarse_paths: opts[:coarse_paths]], else: [])
+    {:ok, segment} =
+      Bench.Scene.segment(inputs, {height, width}, {frame_height, frame_width}, opts, gpu)
 
-    stages = [
-      Stage.Rectification,
-      Stage.Sharpness,
-      {Stage.Disparity, disparity},
-      Stage.SpeckleFilter,
-      Stage.RowAlignment,
-      Stage.TemporalFilter,
-      Stage.Depth,
-      {Stage.PointCloud, decimation: 4},
-      Stage.Quality
-    ]
+    IO.puts(
+      "cloud_decimation=#{opts[:cloud_decimation]} cloud_grid=#{inspect(Enum.find(segment.layout, &(elem(&1, 0) == :cloud_grid)))}"
+    )
 
-    geometry =
-      Map.merge(inputs.geometry, %{
-        width: width,
-        height: height,
-        frame_width: frame_width,
-        frame_height: frame_height
-      })
-
-    {:ok, members} = Segment.members(stages, geometry)
-    options = [byte_storage: not opts[:packed]] ++ gpu
-    {:ok, segment} = NxSegment.build(members, geometry, defn_options: options)
     entries = [left_frame: inputs.left_image, right_frame: inputs.right_image]
     {:ok, _outputs, segment} = Segment.run(NxSegment, entries, segment, :infinity)
     median_ms(fn -> Segment.run(NxSegment, entries, segment, :infinity) end, opts[:runs])
@@ -384,21 +342,6 @@ defmodule Bench.Pipeline do
   def median_ms(fun, runs) do
     times = for _ <- 1..runs, do: elem(:timer.tc(fun), 0) / 1000
     times |> Enum.sort() |> Enum.at(div(runs, 2))
-  end
-
-  # Elements further than `tolerance` from the reference, relative above 1, NaN matching NaN.
-  defp differing(got, want, tolerance) do
-    {got, want} =
-      {Nx.as_type(got, :f32), want |> Nx.backend_copy(Nx.BinaryBackend) |> Nx.as_type(:f32)}
-
-    both_nan = Nx.logical_and(Nx.is_nan(got), Nx.is_nan(want))
-    error = Nx.abs(Nx.subtract(got, want))
-    bound = Nx.multiply(Nx.max(Nx.abs(want), 1.0), tolerance)
-
-    Nx.greater(error, bound)
-    |> Nx.logical_and(Nx.logical_not(both_nan))
-    |> Nx.sum()
-    |> Nx.to_number()
   end
 
   defp format([name, ms, differing]), do: [to_string(name), ms(ms), to_string(differing)]
