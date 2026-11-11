@@ -137,7 +137,7 @@ defmodule NxStereo.Kernels do
     block([left, right, disparity], template, default, fn ->
       rows = %NxIREE.Vulkan.Kernel{
         spirv: image_kernel(:row_alignment_rows, left),
-        workgroups: {sampled, 1, 1},
+        workgroups: {sampled, bands, 1},
         specialization: %{0 => width, 1 => height}
       }
 

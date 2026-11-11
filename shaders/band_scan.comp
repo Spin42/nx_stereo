@@ -12,8 +12,8 @@
 // standing for a candidate its band lacks. A step's loads are issued one step
 // ahead. A horizontal scan reads band_transpose.comp's column-major costs,
 // each pixel's base as its last word, and writes its paths column-major, so a
-// wave's lines are consecutive in memory as a vertical scan's are; with PAIRED
-// it adds the opposite scan's path bytes to its own. With DX2 and DY2, one
+// wave's lines are consecutive in memory as a vertical scan's are. The reverse
+// traversal adds to the forward traversal in the same output. With DX2 and DY2, one
 // dispatch scans two directions and writes both volumes, the second after the
 // first.
 layout(local_size_x = 64) in;
@@ -28,18 +28,10 @@ layout(constant_id = 1) const int HEIGHT = 480;
 #define WINDOW_AT (4 * PAD_WORDS - 1)
 #define WINDOW_WORDS ((SPAN + 3) / 4)
 #define ROW_WORDS ((WINDOW_AT + SPAN) / 4 + WINDOW_WORDS + 1)
-#ifndef PAIRED
-#define PAIRED 0
-#endif
 layout(set = 0, binding = 1) readonly buffer Costs { uint costs[]; };
 #if DY == 0
 #define PIXEL_WORDS (COST_WORDS + 1)
-#if PAIRED
-layout(set = 0, binding = 2) readonly buffer Partner { uint partner[]; };
-layout(set = 0, binding = 3) writeonly buffer Paths { uint paths[]; };
-#else
-layout(set = 0, binding = 2) writeonly buffer Paths { uint paths[]; };
-#endif
+layout(set = 0, binding = 2) buffer Paths { uint paths[]; };
 int base_of(int pixel) { return int(costs[pixel * PIXEL_WORDS + COST_WORDS]); }
 #else
 #define PIXEL_WORDS COST_WORDS
@@ -48,43 +40,7 @@ layout(set = 0, binding = 3) writeonly buffer Paths { uint paths[]; };
 int base_of(int pixel) { return base[pixel]; }
 #endif
 
-// A wide image's diagonal scans fold the diagonals that leave through the
-// image's side into the ones that enter through it, a thread scanning one
-// then the other, so every thread covers HEIGHT pixels.
-bool folded() { return WIDTH >= HEIGHT; }
-
-int lines_of(int dx, int dy) {
-  if (dy == 0) return HEIGHT;
-  if (dx == 0 || folded()) return WIDTH;
-  return WIDTH + HEIGHT - 1;
-}
-
-// The step at which a folded diagonal `line` starts its second diagonal, or
-// -1.
-int second_start(int dx, int dy, int line) {
-  return dy != 0 && dx != 0 && folded() && WIDTH - line < HEIGHT ? WIDTH - line : -1;
-}
-
-// The pixel of `line` at step `i`, or -1 outside the image; column-major in a
-// horizontal scan.
-int pixel_at(int dx, int dy, int line, int i) {
-  int x, y;
-  if (dy == 0) {
-    y = line;
-    x = dx > 0 ? i : WIDTH - 1 - i;
-  } else if (dx != 0 && folded()) {
-    // Down and right in a frame mirrored to the direction: step i is row i.
-    int second = second_start(dx, dy, line);
-    int u = second < 0 || i < second ? line + i : i - second;
-    x = dx > 0 ? u : WIDTH - 1 - u;
-    y = dy > 0 ? i : HEIGHT - 1 - i;
-  } else {
-    y = dy > 0 ? i : HEIGHT - 1 - i;
-    x = dx > 0 ? line - (HEIGHT - 1) + i : (dx < 0 ? line - i : line);
-  }
-  if (x < 0 || x >= WIDTH) return -1;
-  return dy == 0 ? x * HEIGHT + y : y * WIDTH + x;
-}
+#include "band_scan_geometry.glsl"
 
 uint packed(uint previous[BAND], int w) {
   return previous[4 * w] | (previous[4 * w + 1] << 8) | (previous[4 * w + 2] << 16) |
@@ -104,20 +60,31 @@ void advance(inout uint previous[BAND], inout uint packed_previous[WORDS], inout
   // WINDOW_AT + j + delta of a row of P2 bytes that holds the normalized
   // candidates from byte WINDOW_AT + 1. A barrel shifter gathers the row's
   // words from that byte's word, a funnel shift aligns the bytes.
-  uint p2 = uint(P2) * 0x01010101u;
-  uint row[ROW_WORDS];
-  for (int w = 0; w < ROW_WORDS; ++w) row[w] = p2;
-  for (int w = 0; w < WORDS; ++w) row[PAD_WORDS + w] = packed_previous[w] - minimum * 0x01010101u;
-  int at = WINDOW_AT + clamp(delta, -SPAN, SPAN);
-  int word = at >> 2, bits = 8 * (at & 3);
-  for (int s = 1; s < ROW_WORDS; s *= 2) {
-    bool take = (word & s) != 0;
-    for (int w = 0; w < ROW_WORDS; ++w) row[w] = take ? (w + s < ROW_WORDS ? row[w + s] : p2) : row[w];
-  }
-  uint gathered[WINDOW_WORDS];
-  for (int w = 0; w < WINDOW_WORDS; ++w) gathered[w] = (row[w] >> bits) | ((row[w + 1] << (24 - bits)) << 8);
   uint window[SPAN];
-  for (int j = 0; j < SPAN; ++j) window[j] = (gathered[j / 4] >> (8 * (j % 4))) & 255u;
+  // Repeated bases need only normalization. An 8-candidate band keeps
+  // unconditional alignment, where the branch costs more.
+#if BAND == 16
+  if (delta == 0) {
+    window[0] = uint(P2);
+    window[SPAN - 1] = uint(P2);
+    for (int k = 0; k < BAND; ++k) window[k + 1] = previous[k] - minimum;
+  } else
+#endif
+  {
+    uint p2 = uint(P2) * 0x01010101u;
+    uint row[ROW_WORDS];
+    for (int w = 0; w < ROW_WORDS; ++w) row[w] = p2;
+    for (int w = 0; w < WORDS; ++w) row[PAD_WORDS + w] = packed_previous[w] - minimum * 0x01010101u;
+    int at = WINDOW_AT + clamp(delta, -SPAN, SPAN);
+    int word = at >> 2, bits = 8 * (at & 3);
+    for (int s = 1; s < ROW_WORDS; s *= 2) {
+      bool take = (word & s) != 0;
+      for (int w = 0; w < ROW_WORDS; ++w) row[w] = take ? (w + s < ROW_WORDS ? row[w + s] : p2) : row[w];
+    }
+    uint gathered[WINDOW_WORDS];
+    for (int w = 0; w < WINDOW_WORDS; ++w) gathered[w] = (row[w] >> bits) | ((row[w + 1] << (24 - bits)) << 8);
+    for (int j = 0; j < SPAN; ++j) window[j] = (gathered[j / 4] >> (8 * (j % 4))) & 255u;
+  }
 
   for (int k = 0; k < BAND; ++k) {
     uint cost = cost_at(words, k);
@@ -130,7 +97,7 @@ void advance(inout uint previous[BAND], inout uint packed_previous[WORDS], inout
 }
 
 // Scans `line` in the direction (dx, dy), writing its paths at `offset` in Paths.
-void scan(int dx, int dy, int line, int offset) {
+void scan(int dx, int dy, int line, int offset, bool add) {
   uint previous[BAND];
   for (int k = 0; k < BAND; ++k) previous[k] = 0u;
   uint packed_previous[WORDS];
@@ -158,11 +125,13 @@ void scan(int dx, int dy, int line, int offset) {
     }
     if (pixel >= 0) {
       advance(previous, packed_previous, previous_base, b, words);
-#if PAIRED
-      for (int w = 0; w < WORDS; ++w) paths[offset + pixel * WORDS + w] = packed_previous[w] + partner[pixel * WORDS + w];
-#else
-      for (int w = 0; w < WORDS; ++w) paths[offset + pixel * WORDS + w] = packed_previous[w];
+      for (int w = 0; w < WORDS; ++w) {
+        uint value = packed_previous[w];
+#if DY == 0
+        if (add) value += paths[pixel * WORDS + w];
 #endif
+        paths[offset + pixel * WORDS + w] = value;
+      }
     }
 
     pixel = next_pixel;
@@ -173,20 +142,27 @@ void scan(int dx, int dy, int line, int offset) {
 
 void main() {
   load_params();
-#ifdef DX2
+#if DY == 0
+  int line = int(gl_GlobalInvocationID.x);
+  if (line < HEIGHT) {
+    scan(1, 0, line, 0, false);
+    memoryBarrierBuffer();
+    scan(-1, 0, line, 0, true);
+  }
+#elif defined(DX2)
   // Two directions in one dispatch, so their lines run together: the first
   // direction's workgroups, then the second's, whose paths follow the first's.
   int groups = (lines_of(DX, DY) + 63) / 64;
   int group = int(gl_WorkGroupID.x), lane = int(gl_LocalInvocationID.x);
   if (group < groups) {
     int line = group * 64 + lane;
-    if (line < lines_of(DX, DY)) scan(DX, DY, line, 0);
+    if (line < lines_of(DX, DY)) scan(DX, DY, line, 0, false);
   } else {
     int line = (group - groups) * 64 + lane;
-    if (line < lines_of(DX2, DY2)) scan(DX2, DY2, line, WIDTH * HEIGHT * WORDS);
+    if (line < lines_of(DX2, DY2)) scan(DX2, DY2, line, WIDTH * HEIGHT * WORDS, false);
   }
 #else
   int line = int(gl_GlobalInvocationID.x);
-  if (line < lines_of(DX, DY)) scan(DX, DY, line, 0);
+  if (line < lines_of(DX, DY)) scan(DX, DY, line, 0, false);
 #endif
 }

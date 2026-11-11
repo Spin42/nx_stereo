@@ -15,6 +15,13 @@ defmodule NxStereo.Stage.Disparity do
       128 disparities and an even working size.
     * `:coarse_paths` (`:paths`) - the half-size match's paths, with
       `"coarse_to_fine"`.
+    * `:band` (`16`) - 8, 16, 32 or 64 candidates per pixel in the
+      fine search. Wider bands cost more memory and computation.
+    * `:margin` (`4`) - candidates below the coarse estimate, an
+      integer from zero to `band - 1`.
+    * `:fine_census` (`:sparse_9x7`) - `:sparse_9x7`, `:dense_9x5`, or
+      `:dense_9x5_blend`, as `NxStereo.sgm_band/4` describes. Only used
+      with `"coarse_to_fine"`; a static compilation choice.
     * `:matcher` (`nil`) - `:nx` or `:native` to pin where the matching
       is computed; `"coarse_to_fine"` has no native matcher and is
       computed in Nx.
@@ -30,6 +37,9 @@ defmodule NxStereo.Stage.Disparity do
     paths: 8,
     search: "full",
     coarse_paths: nil,
+    band: 16,
+    margin: 4,
+    fine_census: :sparse_9x7,
     matcher: nil
   ]
 
@@ -45,6 +55,7 @@ defmodule NxStereo.Stage.Disparity do
          settings = %{settings | coarse_paths: settings.coarse_paths || settings.paths},
          :ok <- check_matcher(settings.matcher),
          :ok <- check_search(settings, geometry),
+         :ok <- check_census(settings),
          do: {:ok, settings}
   end
 
@@ -70,7 +81,12 @@ defmodule NxStereo.Stage.Disparity do
           NxStereo.sgm_coarse_to_fine(
             tensors.left,
             tensors.right,
-            [coarse_paths: state.coarse_paths] ++ opts
+            [
+              coarse_paths: state.coarse_paths,
+              band: state.band,
+              margin: state.margin,
+              fine_census: state.fine_census
+            ] ++ opts
           )
       end
 
@@ -99,7 +115,25 @@ defmodule NxStereo.Stage.Disparity do
   defp check_search(%{matcher: :native}, _geometry),
     do: {:error, "coarse_to_fine has no native matcher"}
 
+  defp check_search(%{band: band}, _geometry) when band not in [8, 16, 32, 64],
+    do: {:error, "band must be 8, 16, 32 or 64, got #{inspect(band)}"}
+
+  defp check_search(%{margin: margin, band: band}, _geometry)
+       when not is_integer(margin) or margin < 0 or margin >= band,
+       do: {:error, "margin must be an integer from 0 to #{band - 1}, got #{inspect(margin)}"}
+
   defp check_search(_settings, _geometry), do: :ok
+
+  defp check_census(%{fine_census: census})
+       when census not in [:sparse_9x7, :dense_9x5, :dense_9x5_blend],
+       do:
+         {:error,
+          "fine_census must be sparse_9x7, dense_9x5 or dense_9x5_blend, got #{inspect(census)}"}
+
+  defp check_census(%{search: "full", fine_census: census}) when census != :sparse_9x7,
+    do: {:error, "fine_census requires coarse_to_fine search"}
+
+  defp check_census(_settings), do: :ok
 
   defp check_matcher(matcher) when matcher in [nil, :nx, :native], do: :ok
 

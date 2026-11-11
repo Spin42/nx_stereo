@@ -1,0 +1,89 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Copyright 2016 Fixstars Corporation
+// SPDX-License-Identifier: Apache-2.0
+// Dense 9x5 census, optionally blending its centre with a 3x3 Gaussian mean.
+layout(local_size_x = 128) in;
+layout(constant_id = 0) const int WIDTH = 640;
+layout(constant_id = 1) const int HEIGHT = 480;
+const uint THRESHOLD = 1u;
+#include "features.glsl"
+layout(set = 0, binding = 0) readonly buffer Left { int left_image[]; };
+layout(set = 0, binding = 1) readonly buffer Right { int right_image[]; };
+layout(set = 0, binding = 2) writeonly buffer Features { uvec4 features[]; };
+#define HALF_X 4
+#define HALF_Y 2
+#define QUAD 4
+#define COLUMNS (128 / FEATURE_TILE)
+#define GROUP_ROWS (128 * QUAD / COLUMNS)
+#define WINDOW_COLUMNS (COLUMNS + 2 * HALF_X)
+#define WINDOW_ROWS (GROUP_ROWS + 2 * HALF_Y)
+#define LANE_OFFSET 0x01000100u
+#define COMPARE_MASK 0x01000100u
+shared uint rows[WINDOW_ROWS * WINDOW_COLUMNS];
+uint load_pair(int x, int y) {
+  int pixel = clamp(y, 0, HEIGHT - 1) * WIDTH + clamp(x, 0, WIDTH - 1);
+  return (uint(left_image[pixel]) | (uint(right_image[pixel]) << 16)) + LANE_OFFSET;
+}
+void main() {
+  int tid = int(gl_LocalInvocationID.x);
+  int x0 = int(gl_WorkGroupID.x) * COLUMNS;
+  int y0 = int(gl_WorkGroupID.y) * GROUP_ROWS;
+  for (int i = tid; i < WINDOW_ROWS * WINDOW_COLUMNS; i += 128)
+    rows[i] = load_pair(x0 - HALF_X + i % WINDOW_COLUMNS, y0 - HALF_Y + i / WINDOW_COLUMNS);
+  barrier();
+  int row = tid / (COLUMNS / QUAD);
+  int first = (tid % (COLUMNS / QUAD)) * QUAD;
+  int y = y0 + row;
+  if (y >= HEIGHT) return;
+  uint a[QUAD];
+  uvec4 result[QUAD];
+  for (int p = 0; p < QUAD; ++p) {
+    uint c = rows[(row + HALF_Y) * WINDOW_COLUMNS + first + p + HALF_X] - LANE_OFFSET;
+#if BLEND
+    // Equivalent to rounding the Gaussian mean, then rounding its average
+    // with the centre. Each 16-bit lane sums to at most 8184, without carry.
+    uint sum = 16u * c + 0x00180018u;
+    for (int dy = -1; dy <= 1; ++dy) {
+      for (int dx = -1; dx <= 1; ++dx) {
+        uint weight = uint((dy == 0 ? 2 : 1) * (dx == 0 ? 2 : 1));
+        uint pair = rows[(row + HALF_Y + dy) * WINDOW_COLUMNS + first + p + HALF_X + dx] - LANE_OFFSET;
+        sum += weight * pair;
+      }
+    }
+    c = (sum >> 5) & 0x00ff00ffu;
+#endif
+    a[p] = (max(c & 0xffffu, THRESHOLD) - THRESHOLD) | ((max(c >> 16, THRESHOLD) - THRESHOLD) << 16);
+    result[p] = uvec4(0u);
+  }
+  for (int r = 0; r < 2 * HALF_Y + 1; ++r) {
+    uint words[QUAD + 2 * HALF_X];
+    for (int w = 0; w < QUAD + 2 * HALF_X; ++w) words[w] = rows[(row + r) * WINDOW_COLUMNS + first + w];
+    int start = r * (2 * HALF_X + 1) - (r > HALF_Y ? 1 : 0);
+    for (int p = 0; p < QUAD; ++p) {
+      uint bits = 0u;
+      for (int n = 0; n < 2 * HALF_X + 1; ++n) {
+        if (r == HALF_Y && n == HALF_X) continue;
+        int bit = n - (r == HALF_Y && n > HALF_X ? 1 : 0);
+        bits |= (((words[p + n] - a[p]) & COMPARE_MASK) >> 8) << bit;
+      }
+      uint mask = (1u << (2 * HALF_X + (r == HALF_Y ? 0 : 1))) - 1u;
+      uint left = (~bits) & mask, right = (~(bits >> 16)) & mask;
+      if (start < 32) {
+        result[p].x |= left << start;
+        result[p].z |= right << start;
+        if (start + 2 * HALF_X + 1 > 32) {
+          result[p].y |= left >> (32 - start);
+          result[p].w |= right >> (32 - start);
+        }
+      } else {
+        result[p].y |= left << (start - 32);
+        result[p].w |= right << (start - 32);
+      }
+    }
+  }
+  for (int p = 0; p < QUAD; ++p) {
+    int x = x0 + first + p;
+    if (x < WIDTH) features[feature_index(x, y)] = result[p];
+  }
+}

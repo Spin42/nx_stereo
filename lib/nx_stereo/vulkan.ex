@@ -12,6 +12,8 @@ defmodule NxStereo.Vulkan do
   # per band width.
   @shared [
     census: {"census_pair", []},
+    census_dense: {"census_dense_pair", []},
+    census_blend: {"census_dense_pair", ["-DBLEND=1"]},
     consistency: {"consistency_projected", []},
     median: {"filter", []},
     shrink: {"shrink", []},
@@ -34,23 +36,44 @@ defmodule NxStereo.Vulkan do
   @by_band [
     band_cost: {"band_cost", []},
     band_transpose_costs: {"band_transpose", []},
-    band_scan_forward: {"band_scan", ["-DDX=1", "-DDY=0"]},
-    band_scan_reverse: {"band_scan", ["-DDX=-1", "-DDY=0", "-DPAIRED=1"]},
+    band_scan_horizontal: {"band_scan", ["-DDX=1", "-DDY=0"]},
     band_scan_down: {"band_scan", ["-DDX=0", "-DDY=1"]},
-    band_scan_down_up: {"band_scan", ["-DDX=0", "-DDY=1", "-DDX2=0", "-DDY2=-1"]},
-    band_scan_down_diagonals: {"band_scan", ["-DDX=1", "-DDY=1", "-DDX2=-1", "-DDY2=1"]},
-    band_scan_up_diagonals: {"band_scan", ["-DDX=1", "-DDY=-1", "-DDX2=-1", "-DDY2=-1"]},
     band_select: {"band_select", ["-DPATHS=3"]},
     band_select_8: {"band_select", ["-DPATHS=8"]}
   ]
 
+  @narrow_scans [
+    band_scan_down_up: {"band_scan", ["-DDX=0", "-DDY=1", "-DDX2=0", "-DDY2=-1"]},
+    band_scan_down_diagonals: {"band_scan", ["-DDX=1", "-DDY=1", "-DDX2=-1", "-DDY2=1"]},
+    band_scan_up_diagonals: {"band_scan", ["-DDX=1", "-DDY=-1", "-DDX2=-1", "-DDY2=-1"]}
+  ]
+  @wide_scans [
+    band_aggregate_vertical: {"band_scan_aggregate", ["-DDX=0", "-DDY=1", "-DFIRST=1"]},
+    band_aggregate_diagonal: {"band_scan_aggregate", ["-DDX=1", "-DDY=1"]},
+    band_aggregate_antidiagonal: {"band_scan_aggregate", ["-DDX=-1", "-DDY=1"]}
+  ]
+
   # {key, SPIR-V file name, {source, macros}}
-  @variants for({stage, source} <- @shared, do: {stage, "#{stage}", source}) ++
+  @variants [
+              {{:cost_horizontal, 128}, "cost_horizontal_d128",
+               {"cost_first", ["-DDISPARITIES=128", "-DFUSED=1"]}}
+            ] ++
+              for({stage, source} <- @shared, do: {stage, "#{stage}", source}) ++
               (for disparities <- [64, 128], {stage, {source, flags}} <- @by_disparities do
                  macros = ["-DDISPARITIES=#{disparities}" | flags]
                  {{stage, disparities}, "#{stage}_d#{disparities}", {source, macros}}
                end) ++
-              (for band <- [8, 16, 32, 64], {stage, {source, flags}} <- @by_band do
+              (for band <- [8, 16, 32, 64],
+                   {stage, {source, flags}} <-
+                     @by_band ++ if(band >= 32, do: @wide_scans, else: @narrow_scans) do
+                 source =
+                   if source == "band_scan" and band >= 32, do: "band_scan_lanes", else: source
+
+                 flags =
+                   if stage == :band_select_8 and band >= 32,
+                     do: ["-DAGGREGATED=1" | flags],
+                     else: flags
+
                  {{stage, band}, "#{stage}_b#{band}", {source, ["-DBAND=#{band}" | flags]}}
                end)
 
@@ -121,11 +144,18 @@ defmodule NxStereo.Vulkan do
   end
 
   # The census of both images, in tiles of 8 rows.
-  defp census_stage(height, width) do
+  defp census_stage(height, width, census \\ :sparse_9x7) do
+    stage =
+      case census do
+        :sparse_9x7 -> :census
+        :dense_9x5 -> :census_dense
+        :dense_9x5_blend -> :census_blend
+      end
+
     tiled_pixels = width * ceil_div(height, 8) * 8
 
     kernel = %NxIREE.Vulkan.Kernel{
-      spirv: Map.fetch!(@spirv, :census),
+      spirv: Map.fetch!(@spirv, stage),
       workgroups: {ceil_div(width, div(128, 8)), ceil_div(height, 4 * 8), 1},
       specialization: %{0 => width, 1 => height}
     }
@@ -156,8 +186,9 @@ defmodule NxStereo.Vulkan do
   # Census in 8-row tiles, the band's costs once,
   # a thread per path line, a lane per word of a pixel's band for the selection;
   # consistency and median as pipeline/1. The horizontal scans run over a column-major
-  # copy of the costs, the reverse one adding the forward one's path bytes, and the
-  # selection reads their column-major sum.
+  # copy of the costs, adding the reverse path to the forward path in place, and the
+  # selection reads their column-major sum. Wide eight-path bands accumulate the
+  # remaining opposite pairs into ten-bit sums to bound scratch storage.
   def band_pipeline(
         %{height: height, width: width, disparities: disparities, band: band} = config
       ) do
@@ -174,7 +205,9 @@ defmodule NxStereo.Vulkan do
       }
     end
 
-    # A wide image's diagonal scans fold two diagonals into a line, as band_scan.comp.
+    # Wide bands share a line across one subgroup lane per packed word.
+    lines_per_group = if band >= 32, do: div(64, div(band, 4)), else: 64
+    # A wide image's diagonal scans fold two diagonals into a line.
     diagonals = if width >= height, do: width, else: width + height - 1
     lines = %{rows: height, columns: width, diagonals: diagonals}
     tiles = {ceil_div(width, 8), ceil_div(height, 8), 1}
@@ -184,7 +217,7 @@ defmodule NxStereo.Vulkan do
 
       {kernel.(
          Map.fetch!(@spirv, {stage, band}),
-         {directions * ceil_div(lines[kind], 64), 1, 1},
+         {directions * ceil_div(lines[kind], lines_per_group), 1, 1},
          %{}
        ), inputs, [{stage, volume}]}
     end
@@ -192,16 +225,39 @@ defmodule NxStereo.Vulkan do
     horizontal_stages = [
       {kernel.(Map.fetch!(@spirv, {:band_transpose_costs, band}), tiles, %{}), [:costs, :base],
        [columns: Nx.template({pixels * (cost_words + 1)}, :u32)]},
-      scan.(:band_scan_forward, :rows, 1, [:params, :columns]),
-      scan.(:band_scan_reverse, :rows, 1, [:params, :columns, :band_scan_forward])
+      scan.(:band_scan_horizontal, :rows, 1, [:params, :columns])
     ]
 
-    other_scans = Map.fetch!(@band_scans, config.paths)
+    {other_stages, select_inputs} =
+      if config.paths == 8 and band >= 32 do
+        aggregate = Nx.template({div(pixels * band * 10, 32)}, :u32)
+        kinds = [:columns, :diagonals, :diagonals]
 
-    scan_stages =
-      horizontal_stages ++
-        for {stage, {kind, directions}} <- other_scans,
-            do: scan.(stage, kind, directions, [:params, :costs, :base])
+        {stages, last} =
+          Enum.zip(@wide_scans, kinds)
+          |> Enum.map_reduce(:band_scan_horizontal, fn {{stage, _source}, kind}, previous ->
+            step =
+              {kernel.(
+                 Map.fetch!(@spirv, {stage, band}),
+                 {ceil_div(lines[kind], lines_per_group), 1, 1},
+                 %{}
+               ), [:params, :costs, :base, previous], [{stage, aggregate}]}
+
+            {step, stage}
+          end)
+
+        {stages, [last]}
+      else
+        other_scans = Map.fetch!(@band_scans, config.paths)
+
+        stages =
+          for {stage, {kind, directions}} <- other_scans,
+              do: scan.(stage, kind, directions, [:params, :costs, :base])
+
+        {stages, [:band_scan_horizontal | Keyword.keys(other_scans)]}
+      end
+
+    scan_stages = horizontal_stages ++ other_stages
 
     select = if config.paths == 8, do: :band_select_8, else: :band_select
 
@@ -209,7 +265,7 @@ defmodule NxStereo.Vulkan do
       inputs: [:left, :right, :params, :base],
       stages:
         [
-          census_stage(height, width),
+          census_stage(height, width, Map.get(config, :census, :sparse_9x7)),
           {kernel.(
              Map.fetch!(@spirv, {:band_cost, band}),
              {ceil_div(width, 64), ceil_div(height, 4), 1},
@@ -220,13 +276,19 @@ defmodule NxStereo.Vulkan do
           [
             {kernel.(
                Map.fetch!(@spirv, {select, band}),
-               {ceil_div(pixels * div(band, 4), 64), 1, 1},
+               linear_workgroups(ceil_div(pixels * div(band, 4), 64)),
                %{2 => disparities}
-             ), [:params, :base, :band_scan_reverse | Keyword.keys(other_scans)],
+             ), [:params, :base | select_inputs],
              [disparity: map, winners: Nx.template({pixels}, :u32)]}
           ] ++ check_and_median_stages(height, width),
       outputs: [:output]
     }
+  end
+
+  @max_workgroups 65_535
+  defp linear_workgroups(count) do
+    rows = ceil_div(count, @max_workgroups)
+    {ceil_div(count, rows), rows, 1}
   end
 
   def pipeline(%{height: height, width: width, disparities: disparities} = config) do
@@ -271,16 +333,27 @@ defmodule NxStereo.Vulkan do
         ]
       end
 
-    %NxIREE.Vulkan.Pipeline{
-      inputs: [:left, :right, :params],
-      stages:
+    # Fusion is retained only where complete-chain measurements show a repeatable gain.
+    horizontal =
+      if disparities == 128 and config.paths == 3 do
         [
-          census_stage(height, width),
+          {kernel.(:cost_horizontal, {rows, 1, 1}), [:params, :features],
+           [forward_reverse: volume, costs: volume]}
+        ]
+      else
+        [
           {kernel.(:cost_forward, {rows, 1, 1}), [:params, :features],
            [forward: volume, costs: volume]},
           {kernel.(:cost_reverse, {rows, 1, 1}), [:params, :costs, :forward],
            [forward_reverse: volume]}
-        ] ++
+        ]
+      end
+
+    %NxIREE.Vulkan.Pipeline{
+      inputs: [:left, :right, :params],
+      stages:
+        [census_stage(height, width)] ++
+          horizontal ++
           aggregation ++ check_and_median_stages(height, width),
       outputs: [:output]
     }

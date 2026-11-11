@@ -1,0 +1,68 @@
+#version 450
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_KHR_shader_subgroup_shuffle_relative : require
+#extension GL_GOOGLE_include_directive : require
+// Copyright 2016 Fixstars Corporation
+// SPDX-License-Identifier: Apache-2.0
+// Scan opposite directions together and add them to a ten-bit aggregate.
+layout(local_size_x = 64) in;
+layout(constant_id = 0) const int WIDTH = 640;
+layout(constant_id = 1) const int HEIGHT = 480;
+#include "params.glsl"
+#include "band_common.glsl"
+#include "band_aggregate.glsl"
+#define PIXEL_WORDS COST_WORDS
+layout(set = 0, binding = 1) readonly buffer Costs { uint costs[]; };
+layout(set = 0, binding = 2) readonly buffer Base { int base[]; };
+layout(set = 0, binding = 3) readonly buffer Aggregate { uint aggregate[]; };
+layout(set = 0, binding = 4) buffer Paths { uint paths[]; };
+int base_of(int pixel) { return base[pixel]; }
+#include "band_scan_geometry.glsl"
+
+uvec4 aggregate_at(int pixel, int lane) {
+  uint lo = aggregate[pixel * AGG_WORDS + lane];
+  uint hi = aggregate[pixel * AGG_WORDS + WORDS + lane / 4];
+  return unpack_aggregate(lo, hi, 8 * (lane % 4));
+}
+void store_path(int pixel, int lane, uint own, bool add) {
+  int at = pixel * AGG_WORDS + lane;
+  if (!add) {
+    // Temporary path bytes occupy the first WORDS slots of each aggregate.
+    paths[at] = own;
+  } else {
+    // Each lane reads its own temporary word before overwriting that slot.
+    // Both path bytes are below 128, so this addition cannot carry.
+    uint pair = own + paths[at];
+    uvec4 sum = uvec4(pair & 255u, (pair >> 8) & 255u, (pair >> 16) & 255u, pair >> 24);
+#if FIRST
+    int x = pixel % WIDTH, y = pixel / WIDTH;
+    uint previous = aggregate[(x * HEIGHT + y) * WORDS + lane];
+    sum += uvec4(previous & 255u, (previous >> 8) & 255u, (previous >> 16) & 255u, previous >> 24);
+#else
+    sum += aggregate_at(pixel, lane);
+#endif
+    uint lo = sum.x | (sum.y << 10) | (sum.z << 20) | (sum.w << 30);
+    // Four lanes share one high-byte word; low words stay lane-contiguous.
+    uint hi = (sum.w >> 2) << (8 * (lane % 4));
+    hi |= subgroupShuffleXor(hi, 1u);
+    hi |= subgroupShuffleXor(hi, 2u);
+    paths[pixel * AGG_WORDS + lane] = lo;
+    if (lane % 4 == 0) paths[pixel * AGG_WORDS + WORDS + lane / 4] = hi;
+  }
+}
+
+#include "band_scan_lanes.glsl"
+
+void main() {
+  load_params();
+  int lane = int(gl_LocalInvocationID.x) % WORDS;
+  int line = int(gl_GlobalInvocationID.x) / WORDS;
+  if (line < lines_of(DX, DY)) {
+    // Opposite folded lines visit the same pixels, including both diagonals.
+    int reverse_line = DX != 0 && folded() ? (2 * WIDTH - HEIGHT - line) % WIDTH : line;
+    scan(DX, DY, line, lane, false);
+    memoryBarrierBuffer();
+    scan(-DX, -DY, reverse_line, lane, true);
+  }
+}
