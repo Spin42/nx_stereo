@@ -70,6 +70,22 @@ defmodule NxStereo.Diagnostics do
   end
 
   @doc """
+  Each image's mean grey from its `sharpness_sums/2`, over the pixels
+  sharpness counts, black ones left out, as `%{left: float, right:
+  float}`; 0.0 for an image without a counted pair. With both cameras at
+  the same exposure and gain, a brighter image is a camera seeing
+  differently, as through a hazy lens.
+  """
+  @spec brightness(Nx.Tensor.t()) :: %{left: float(), right: float()}
+  def brightness(sums) do
+    [_left_energy, _right_energy, left_grey, right_grey, left_pairs, right_pairs] =
+      Nx.to_flat_list(sums)
+
+    mean = fn grey, pairs -> if pairs > 0, do: grey / pairs, else: 0.0 end
+    %{left: mean.(left_grey, left_pairs), right: mean.(right_grey, right_pairs)}
+  end
+
+  @doc """
   The sums `row_alignment/2` measures the row offset between the
   rectified `left` and `right` images from, both `u8` or both `s32`,
   given the `f32` `disparity` of `left`. On every `:row_step`-th row,
