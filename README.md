@@ -72,7 +72,10 @@ native program's server and build a native segment instead:
 
 Each stage reads tensors by name and adds its own. Its settings are its
 options in the list; those marked live are inputs of the compiled function,
-changed without compiling again, the others are fixed when it compiles.
+changed without compiling again, the others are fixed when it compiles. A
+stage declares them with their defaults, types and accepted values
+(`settings/0`), which `init/2` checks and an application can read to
+present them.
 
 | Stage | Reads | Adds | Settings | Native |
 | --- | --- | --- | --- | --- |

@@ -15,8 +15,6 @@ defmodule NxStereo.Stage.SpeckleFilter do
   @behaviour NxStereo.Stage
 
   @radius 3
-  @defaults [min_support: 12, max_diff: 1.0]
-
   @impl NxStereo.Stage
   def requires, do: [:disparity]
 
@@ -24,7 +22,30 @@ defmodule NxStereo.Stage.SpeckleFilter do
   def provides, do: [:disparity]
 
   @impl NxStereo.Stage
-  def init(settings, _geometry), do: NxStereo.Stage.settings(settings, @defaults)
+  def settings do
+    neighbours = (2 * @radius + 1) * (2 * @radius + 1) - 1
+
+    [
+      min_support: %{
+        default: 12,
+        type: :integer,
+        range: {0, neighbours},
+        live: true,
+        doc:
+          "Neighbours in the 7x7 window that must agree for a pixel to be kept; 0 turns the filter off"
+      },
+      max_diff: %{
+        default: 1.0,
+        type: :float,
+        range: {0, 8},
+        live: true,
+        doc: "How close, in pixels, a neighbour's disparity must be to agree"
+      }
+    ]
+  end
+
+  @impl NxStereo.Stage
+  def init(settings, _geometry), do: NxStereo.Stage.init_settings(__MODULE__, settings)
 
   @impl NxStereo.Stage
   def params(state, _geometry), do: Map.take(state, [:min_support, :max_diff])

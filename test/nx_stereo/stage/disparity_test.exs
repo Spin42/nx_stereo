@@ -40,7 +40,7 @@ defmodule NxStereo.Stage.DisparityTest do
     settings = [search: "coarse_to_fine", num_disparities: 128, band: 12]
 
     assert {:error, message} = Disparity.init(settings, @geometry)
-    assert message =~ "band must be 8, 16, 32 or 64"
+    assert message =~ "band must be one of [8, 16, 32, 64]"
   end
 
   test "rejects margins that do not keep the coarse estimate inside the band" do
@@ -48,7 +48,7 @@ defmodule NxStereo.Stage.DisparityTest do
       settings = [search: "coarse_to_fine", num_disparities: 128, band: 16, margin: margin]
 
       assert {:error, message} = Disparity.init(settings, @geometry)
-      assert message =~ "margin must be an integer"
+      assert message =~ "margin must be"
     end
   end
 

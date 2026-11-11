@@ -25,9 +25,22 @@ defmodule NxStereo.Stage.Rectification do
   def provides, do: [:left, :right]
 
   @impl NxStereo.Stage
+  def settings do
+    [
+      right_row_offset: %{
+        default: 0.0,
+        type: :float,
+        range: {-8, 8},
+        live: true,
+        doc: "Rows the right image is moved by to line up with the left one"
+      }
+    ]
+  end
+
+  @impl NxStereo.Stage
   def init(settings, geometry) do
     with :ok <- check_frame_size(geometry),
-         {:ok, settings} <- NxStereo.Stage.settings(settings, right_row_offset: 0.0),
+         {:ok, settings} <- NxStereo.Stage.init_settings(__MODULE__, settings),
          do: {:ok, Map.put(settings, :size, NxStereo.Stage.size(geometry))}
   end
 
