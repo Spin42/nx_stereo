@@ -1,6 +1,6 @@
 # Ground-truth quality and matcher timings. Datasets are cached in _build/bench.
 #
-#     mix run bench/datasets.exs --datasets middlebury,eth3d,kitti \
+#     mix run test/bench/datasets.exs --datasets middlebury,eth3d,kitti \
 #       --search coarse_to_fine --paths 8 --coarse-paths 3 --band 16 --margin 4 \
 #       --runs 20 --csv quality.csv
 #

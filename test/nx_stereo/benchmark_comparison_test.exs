@@ -1,4 +1,4 @@
-Code.require_file("../../bench/support/compare.exs", __DIR__)
+Code.require_file("../bench/support/compare.exs", __DIR__)
 
 defmodule NxStereo.BenchmarkComparisonTest do
   use ExUnit.Case, async: true

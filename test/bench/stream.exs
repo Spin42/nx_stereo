@@ -2,7 +2,7 @@
 # download overlapping the next computation. Camera capture and display are
 # outside the measurement. Compare serial and overlap using the same workload:
 #
-#   mix run bench/stream.exs --size 544x728 --frames 300 --rounds 3
+#   mix run test/bench/stream.exs --size 544x728 --frames 300 --rounds 3
 #     --band 32 --margin 8 --coarse-paths 8 --packed
 #
 # Compilation, fixture generation and warm-up are excluded. Every timed frame

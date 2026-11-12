@@ -3,7 +3,7 @@
 # speckle and temporal filters, depth, the point cloud and the diagnostics,
 # on a synthetic textured pair.
 #
-#     mix run bench/pipeline.exs [--size 544x728] [--frame 1088x1456]
+#     mix run test/bench/pipeline.exs [--size 544x728] [--frame 1088x1456]
 #       [--search full|coarse_to_fine] [--disparities 64|128] [--paths 3|8]
 #       [--coarse-paths 3|8] [--band 16] [--margin 4] [--packed] [--kernels] [--runs 20]
 #       [--device URI_SUBSTRING]
