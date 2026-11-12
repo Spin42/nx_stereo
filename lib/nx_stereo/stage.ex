@@ -153,7 +153,8 @@ defmodule NxStereo.Stage do
   @doc """
   `settings` over the defaults `module` declares (`c:settings/0`), as a
   map, for its `init/2`: a setting it does not declare, or a value its
-  declaration refuses, is an error. A `nil` value is left for `init/2`.
+  declaration refuses, is an error. A setting with a `nil` default may
+  leave that value for `init/2`.
   """
   @spec init_settings(module(), keyword()) :: {:ok, map()} | {:error, String.t()}
   def init_settings(module, settings) do
@@ -169,7 +170,9 @@ defmodule NxStereo.Stage do
     Enum.find_value(declared, :ok, fn {key, setting} ->
       value = values[key]
 
-      if value != nil and not accepts?(setting, value),
+      optional_nil? = value == nil and setting.default == nil
+
+      if not optional_nil? and not accepts?(setting, value),
         do: {:error, "#{key} must be #{accepted(setting)}, got #{inspect(value)}"}
     end)
   end

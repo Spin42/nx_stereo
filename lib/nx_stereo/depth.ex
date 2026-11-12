@@ -41,13 +41,14 @@ defmodule NxStereo.Depth do
 
   ## Options
 
-    * `:decimation` - depth pixels per point in each direction. Defaults
-      to 1.
+    * `:decimation` - positive integer depth pixels per point in each
+      direction, no greater than either image dimension. Defaults to 1.
     * `:min_depth_m` - defaults to 0.
     * `:max_depth_m` - defaults to infinity.
   """
   deftransform point_cloud(depth_m, focal_length_px, cx, cy, opts \\ []) do
     opts = Keyword.validate!(opts, decimation: 1, min_depth_m: 0.0, max_depth_m: :infinity)
+    check_decimation!(Nx.shape(depth_m), opts[:decimation])
 
     max_depth_m =
       if opts[:max_depth_m] == :infinity,
@@ -59,6 +60,14 @@ defmodule NxStereo.Depth do
     NxStereo.Kernels.point_cloud(depth_m, params, opts[:decimation], fn [depth_m, params] ->
       point_cloud_n(depth_m, params, decimation: opts[:decimation])
     end)
+  end
+
+  defp check_decimation!({height, width}, decimation) do
+    unless is_integer(decimation) and decimation > 0 and decimation <= min(height, width) do
+      raise ArgumentError,
+            "point_cloud/5 needs a positive integer decimation within the #{width}x#{height} image, " <>
+              "got #{inspect(decimation)}"
+    end
   end
 
   defnp point_cloud_n(depth_m, params, opts \\ []) do
