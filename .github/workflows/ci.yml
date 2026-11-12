@@ -30,7 +30,8 @@ jobs:
       - run: mix deps.get
       - run: mix format --check-formatted
       - run: mix compile --warnings-as-errors
-      - run: mix test
+      # EXLA compilation already uses multiple CPU threads.
+      - run: mix test --max-cases 2
 
   native:
     # The matching's NEON winner search is compiled and tested only on arm64.

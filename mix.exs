@@ -9,6 +9,7 @@ defmodule NxStereo.MixProject do
       version: @version,
       elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
+      test_ignore_filters: [~r"^test/bench/"],
       compilers: compilers(),
       make_targets: ["all"],
       make_clean: ["clean"],
