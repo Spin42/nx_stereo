@@ -69,7 +69,8 @@ defmodule NxStereo.Rectify do
 
     opts = [size: size, scale: {in_width / width, in_height / height}]
 
-    if Nx.type(image) == {:u, 8} and rem(width, 4) == 0 do
+    # Whole-word loads require a complete final word in the source buffer.
+    if Nx.type(image) == {:u, 8} and rem(width, 4) == 0 and rem(Nx.size(image), 4) == 0 do
       NxStereo.Kernels.rectify(image, camera_vector(camera), size, fn [image, vector] ->
         rectify_n(image, camera_map(vector), opts)
       end)

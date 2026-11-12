@@ -4,8 +4,10 @@ defmodule NxStereo.WideBandTest do
   @moduletag :vulkan
   setup_all do: NxStereo.TestDevices.vulkan()
 
-  for band <- [32, 64] do
-    test "band #{band} preserves reference decisions at penalty limits", %{devices: devices} do
+  for band <- [32, 64], paths <- [3, 8] do
+    test "band #{band} with #{paths} paths preserves reference decisions at penalty limits", %{
+      devices: devices
+    } do
       shape = {18, 98}
       {left, _key} = Nx.Random.randint(Nx.Random.key(53), 0, 256, shape: shape, type: :s32)
       {right, _key} = Nx.Random.randint(Nx.Random.key(92), 0, 256, shape: shape, type: :s32)
@@ -16,7 +18,7 @@ defmodule NxStereo.WideBandTest do
         &NxStereo.sgm_band(&1, &2, &3,
           disparities: 128,
           band: unquote(band),
-          paths: 8,
+          paths: unquote(paths),
           p1: &4,
           p2: &5
         )

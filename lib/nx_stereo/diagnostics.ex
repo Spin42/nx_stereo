@@ -24,7 +24,13 @@ defmodule NxStereo.Diagnostics do
   it reaches past a camera's frame, out of the measure.
   """
   deftransform sharpness_sums(left, right) do
-    NxStereo.Kernels.sharpness(left, right, fn [left, right] -> sharpness_sums_n(left, right) end)
+    if Nx.axis_size(left, 1) == 1 do
+      Nx.broadcast(Nx.f32(0), {6})
+    else
+      NxStereo.Kernels.sharpness(left, right, fn [left, right] ->
+        sharpness_sums_n(left, right)
+      end)
+    end
   end
 
   defnp sharpness_sums_n(left, right) do
@@ -108,12 +114,17 @@ defmodule NxStereo.Diagnostics do
     defaults = NxStereo.Kernels.alignment()
     opts = Keyword.validate!(opts, Map.to_list(defaults))
 
-    if Map.new(opts) == defaults do
-      NxStereo.Kernels.row_alignment(left, right, disparity, fn [left, right, disparity] ->
+    cond do
+      Nx.axis_size(left, 1) < opts[:bands] ->
+        Nx.broadcast(Nx.f32(0), {opts[:bands], 2 * opts[:reach] + 2})
+
+      Map.new(opts) == defaults ->
+        NxStereo.Kernels.row_alignment(left, right, disparity, fn [left, right, disparity] ->
+          row_alignment_sums_n(left, right, disparity, opts)
+        end)
+
+      true ->
         row_alignment_sums_n(left, right, disparity, opts)
-      end)
-    else
-      row_alignment_sums_n(left, right, disparity, opts)
     end
   end
 

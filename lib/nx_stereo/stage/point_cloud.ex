@@ -8,7 +8,7 @@ defmodule NxStereo.Stage.PointCloud do
   ## Settings
 
     * `:decimation` (`4`) - depth pixels per point in each direction,
-      fixed when compiled.
+      fixed when compiled and no greater than either working dimension.
   """
   @behaviour NxStereo.Stage
 
@@ -35,7 +35,11 @@ defmodule NxStereo.Stage.PointCloud do
   end
 
   @impl NxStereo.Stage
-  def init(settings, _geometry), do: NxStereo.Stage.init_settings(__MODULE__, settings)
+  def init(settings, geometry) do
+    with {:ok, settings} <- NxStereo.Stage.init_settings(__MODULE__, settings),
+         :ok <- check_decimation(settings.decimation, geometry),
+         do: {:ok, settings}
+  end
 
   @impl NxStereo.Stage
   def params(_state, geometry) do
@@ -65,4 +69,11 @@ defmodule NxStereo.Stage.PointCloud do
 
   @impl NxStereo.Stage
   def native_constants, do: %{min_depth_m: @min_depth_m, max_depth_m: @max_depth_m}
+
+  defp check_decimation(decimation, %{height: height, width: width})
+       when decimation <= height and decimation <= width,
+       do: :ok
+
+  defp check_decimation(decimation, %{height: height, width: width}),
+    do: {:error, "decimation must fit working size #{width}x#{height}, got #{decimation}"}
 end

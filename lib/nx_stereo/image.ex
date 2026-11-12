@@ -394,13 +394,14 @@ defmodule NxStereo.Image do
   ]
 
   @doc """
-  Shrinks a `u8` `{height, width}` image to `size` (`{height, width}`)
+  Shrinks a `u8` or `s32` `{height, width}` image to `size` (`{height, width}`)
   by area averaging, as OpenCV's `INTER_AREA`: each output pixel is the
-  mean of the input area it covers. The same size returns the image as it
-  is.
+  mean of the input area it covers. Pixel storage stays `s32` for devices
+  without byte storage. The same size returns the image as it is.
   """
   deftransform resize_area(image, {height, width} = size) do
     {in_height, in_width} = Nx.shape(image)
+    type = if Nx.type(image) == {:s, 32}, do: :s32, else: :u8
 
     cond do
       {in_height, in_width} == size ->
@@ -419,13 +420,11 @@ defmodule NxStereo.Image do
         |> Nx.transpose()
         |> Nx.round()
         |> Nx.clip(0, 255)
-        |> Nx.as_type(:u8)
+        |> Nx.as_type(type)
     end
   end
 
-  # Each output row is the weighted sum of the few input rows it covers,
-  # gathered from the flattened image: `Nx.gather`, as an axis `take`
-  # does not compile on NxIREE.
+  # Gather flattened area taps because NxIREE cannot compile an axis take.
   defp shrink_rows(image, size) do
     {in_size, width} = Nx.shape(image)
     {rows, weights} = area_weights(size, in_size)
@@ -443,11 +442,20 @@ defmodule NxStereo.Image do
     |> Nx.gather(indices)
     |> Nx.reshape({size, taps, width})
     |> Nx.multiply(Nx.reshape(weights, {size, taps, 1}))
-    |> Nx.sum(axes: [1])
+    |> sum_taps()
   end
 
-  # For each output pixel, the input pixels it covers and their shares,
-  # padded to the same count with zero weights.
+  # Each pixel accumulates its taps locally, without a shared output reduction.
+  defp sum_taps(weighted) do
+    taps = Nx.axis_size(weighted, 1)
+
+    for tap <- 0..(taps - 1) do
+      weighted |> Nx.slice_along_axis(tap, 1, axis: 1) |> Nx.squeeze(axes: [1])
+    end
+    |> Enum.reduce(fn pixels, total -> Nx.add(total, pixels) end)
+  end
+
+  # Pad each pixel's area taps to the same count with zero weights.
   defp area_weights(size, in_size) do
     scale = in_size / size
 
@@ -497,20 +505,32 @@ defmodule NxStereo.Image do
   end
 
   @doc false
-  # `image` moved by `dy` rows and `dx` columns, the edge repeated: slices
-  # rather than an axis `take`, which NxIREE cannot compile.
-  def shift(image, dy, dx), do: image |> shift_axis(dy, 0) |> shift_axis(dx, 1)
+  def shift(image, dy, dx) do
+    # Slices avoid the axis take unsupported by NxIREE.
+    image |> shift_axis(dy, 0) |> shift_axis(dx, 1)
+  end
 
   defp shift_axis(image, 0, _axis), do: image
 
-  defp shift_axis(image, offset, axis) when offset > 0 do
+  defp shift_axis(image, offset, axis) do
+    size = Nx.axis_size(image, axis)
+
+    if abs(offset) >= size do
+      edge = if offset > 0, do: size - 1, else: 0
+      image |> Nx.slice_along_axis(edge, 1, axis: axis) |> Nx.broadcast(Nx.shape(image))
+    else
+      shift_inside(image, offset, axis)
+    end
+  end
+
+  defp shift_inside(image, offset, axis) when offset > 0 do
     size = Nx.axis_size(image, axis)
     edge = Nx.slice_along_axis(image, size - 1, 1, axis: axis)
     rest = Nx.slice_along_axis(image, offset, size - offset, axis: axis)
     Nx.concatenate([rest | List.duplicate(edge, offset)], axis: axis)
   end
 
-  defp shift_axis(image, offset, axis) do
+  defp shift_inside(image, offset, axis) do
     size = Nx.axis_size(image, axis)
     edge = Nx.slice_along_axis(image, 0, 1, axis: axis)
     rest = Nx.slice_along_axis(image, 0, size + offset, axis: axis)

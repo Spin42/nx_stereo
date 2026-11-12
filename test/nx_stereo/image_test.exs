@@ -74,6 +74,19 @@ defmodule NxStereo.ImageTest do
       assert Nx.to_list(Image.median(image, 3)) == [[2, 3, 3], [4, 5, 6], [7, 7, 8]]
     end
 
+    test "replicates borders when the image is smaller than the median window" do
+      cases = [
+        {[[7.0]], [[7.0]]},
+        {[[1.0, 9.0]], [[1.0, 9.0]]},
+        {[[1.0], [9.0]], [[1.0], [9.0]]},
+        {[[1.0, 2.0], [3.0, 4.0]], [[2.0, 2.0], [3.0, 3.0]]}
+      ]
+
+      for {pixels, expected} <- cases, kernel_size <- [3, 5] do
+        assert Nx.to_list(Image.median(Nx.tensor(pixels), kernel_size)) == expected
+      end
+    end
+
     test "takes 3 or 5" do
       assert_raise ArgumentError, ~r/3 or 5/, fn -> Image.median(Nx.iota({8, 8}), 7) end
     end

@@ -194,7 +194,13 @@ defmodule NxStereo.NativeSegmentTest do
       principal_point: {4.0, 1.0}
     }
 
-    stages = [Stage.Rectification, Stage.Disparity, Stage.Depth, Stage.PointCloud]
+    stages = [
+      Stage.Rectification,
+      Stage.Disparity,
+      Stage.Depth,
+      {Stage.PointCloud, decimation: 2}
+    ]
+
     {:ok, members} = Segment.members(stages, geometry)
 
     for member <- members,

@@ -20,6 +20,10 @@ SelectGeometry select_geometry(int x, uint lane) {
 uint pick(uint values[BLOCK], uint index) {
   uint t[BLOCK];
   for (int i = 0; i < BLOCK; ++i) t[i] = values[i];
+#if BLOCK == 16
+  bool high8 = (index & 8u) != 0u;
+  for (int i = 0; i < 8; ++i) t[i] = high8 ? t[i + 8] : t[i];
+#endif
   bool high4 = (index & 4u) != 0u;
   for (int i = 0; i < 4; ++i) t[i] = high4 ? t[i + 4] : t[i];
   bool high2 = (index & 2u) != 0u;

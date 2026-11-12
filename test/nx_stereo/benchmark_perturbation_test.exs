@@ -1,4 +1,4 @@
-Code.require_file("../../bench/support/perturbation.exs", __DIR__)
+Code.require_file("../bench/support/perturbation.exs", __DIR__)
 
 defmodule NxStereo.BenchmarkPerturbationTest do
   use ExUnit.Case, async: true

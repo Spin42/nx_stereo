@@ -516,7 +516,7 @@ the matching against a step-by-step transcription of `NxStereo.sgm/3`.
 
 ## Benchmark
 
-`mix run bench/pipeline.exs` times each stage of a depth pipeline on a
+`mix run test/bench/pipeline.exs` times each stage of a depth pipeline on a
 Vulkan device, on a synthetic textured pair: rectification, matching, the
 filters, depth, the point cloud and the diagnostics. Each stage is
 compiled alone, with its inputs on the device, and compared with EXLA's
@@ -528,7 +528,7 @@ its Vulkan kernels run alone. Run it after changing a shader to see what
 the change is worth and that the results still match;
 [Optimizing a stage](docs/optimizing.md) describes the whole method.
 
-`mix run bench/stream.exs` measures the complete chain on a changing sequence
+`mix run test/bench/stream.exs` measures the complete chain on a changing sequence
 of CPU frames. It uploads every pair, propagates temporal state and downloads
 all published outputs. Serial and overlapped modes must produce identical
 outputs and carry before timing starts. The report separates sustained FPS,
@@ -536,7 +536,7 @@ completion intervals and frame latency, including counts above 33.33 ms.
 Compilation, warm-up, camera capture and display are outside the measurement.
 
 ```shell
-mix run bench/stream.exs --size 544x728 --band 32 --margin 8 --coarse-paths 8 --packed --frames 300 --rounds 3
+mix run test/bench/stream.exs --size 544x728 --band 32 --margin 8 --coarse-paths 8 --packed --frames 300 --rounds 3
 ```
 
 `--mode serial|overlap|both` chooses how downloads run; `--sequence` controls
@@ -547,14 +547,14 @@ A value of 1 publishes a point at every depth pixel, producing 16 times as
 many grid points as the default. The reported grid dimensions and complete
 chain timings include that output density and its download.
 
-`mix run bench/datasets.exs` caches the Middlebury MiddEval3 training scenes
+`mix run test/bench/datasets.exs` caches the Middlebury MiddEval3 training scenes
 in `_build/bench` and reports coverage, matched pixels more than 2 disparities
 off, bad-or-missing pixels and mean absolute disparity error. On Vulkan it
 also compares the output with EXLA and records median and p90 matcher times
 after warmup, with resident inputs and the output downloaded each time.
 
 ```shell
-mix run bench/datasets.exs --datasets middlebury,eth3d,kitti --search coarse_to_fine --paths 8 --coarse-paths 3 --band 16 --margin 4 --runs 20 --csv quality.csv
+mix run test/bench/datasets.exs --datasets middlebury,eth3d,kitti --search coarse_to_fine --paths 8 --coarse-paths 3 --band 16 --margin 4 --runs 20 --csv _build/bench/quality.csv
 ```
 
 ETH3D needs `7z`; KITTI 2015 downloads 1.7 GB. `--device` selects a Vulkan

@@ -43,6 +43,15 @@ defmodule NxStereo.DiagnosticsTest do
     assert right_sharpness == 0.0
   end
 
+  test "a single-column image has no horizontal pairs to measure" do
+    image = Nx.tensor([[10], [20], [30]], type: :u8)
+    sums = Nx.Defn.jit(&Diagnostics.sharpness_sums/2).(image, image)
+
+    assert Nx.to_flat_list(sums) == List.duplicate(0.0, 6)
+    assert Diagnostics.sharpness(sums) == %{left: 0.0, right: 0.0}
+    assert Diagnostics.brightness(sums) == %{left: 0.0, right: 0.0}
+  end
+
   test "sharpness takes s32 images as u8 ones" do
     left = texture(16, 24, 1)
     right = texture(16, 24, 2)
@@ -65,6 +74,24 @@ defmodule NxStereo.DiagnosticsTest do
   defp row_alignment(left, right, disparity, opts \\ []) do
     Nx.Defn.jit(&Diagnostics.row_alignment_sums/3).(left, right, disparity)
     |> Diagnostics.row_alignment(opts)
+  end
+
+  test "row alignment has no samples when the image is narrower than its band count" do
+    image = Nx.tensor([[10, 20, 30]], type: :u8)
+    disparity = Nx.tensor([[1.0, 1.0, 1.0]])
+
+    for bands <- [4, 8] do
+      sums =
+        Nx.Defn.jit(&Diagnostics.row_alignment_sums(&1, &2, &3, bands: bands)).(
+          image,
+          image,
+          disparity
+        )
+
+      assert Nx.shape(sums) == {bands, 6}
+      assert Nx.to_flat_list(sums) == List.duplicate(0.0, bands * 6)
+      assert Diagnostics.row_alignment(sums) == nil
+    end
   end
 
   test "row alignment finds no offset between rows that line up" do

@@ -35,11 +35,34 @@ void store_path(int pixel, int lane, uint value, bool add) {
 }
 
 #include "band_scan_lanes.glsl"
+#include "band_scan_scalar.glsl"
+
+void store_scalar_path(int pixel, uint previous[BAND], bool add) {
+  for (int word = 0; word < WORDS; ++word) {
+    uint value = pack_scalar(previous, word);
+#if DY == 0
+    if (add) value += paths[pixel * WORDS + word];
+#endif
+    paths[pixel * WORDS + word] = value;
+  }
+}
 
 void main() {
   load_params();
   int lane = int(gl_LocalInvocationID.x) % WORDS;
   int line = int(gl_GlobalInvocationID.x) / WORDS;
+  if (gl_SubgroupSize < uint(WORDS)) {
+    if (lane == 0 && line < lines_of(DX, DY)) {
+#if DY == 0
+      scan_scalar(1, 0, line, false);
+      memoryBarrierBuffer();
+      scan_scalar(-1, 0, line, true);
+#else
+      scan_scalar(DX, DY, line, false);
+#endif
+    }
+    return;
+  }
   if (line < lines_of(DX, DY)) {
 #if DY == 0
     scan(1, 0, line, lane, false);
