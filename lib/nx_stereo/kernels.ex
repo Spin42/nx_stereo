@@ -19,6 +19,7 @@ defmodule NxStereo.Kernels do
 
   # Each kernel's GLSL source in shaders/ and its macros, for `mix nx_stereo.shaders`.
   @variants [
+    decode_half: {"decode_half", []},
     rectify_words: {"rectify", ["-DWORDS=1"]},
     rectify_bytes: {"rectify", ["-DWORDS=0"]},
     sharpness_rows_words: {"sharpness_rows", ["-DWORDS=1"]},
@@ -79,6 +80,25 @@ defmodule NxStereo.Kernels do
         inputs: [:frame, :camera],
         stages: [{kernel, [:frame, :camera], outputs}],
         outputs: Keyword.keys(outputs)
+      }
+    end)
+  end
+
+  @doc false
+  def decode_half(left, right, {height, width} = size, default) do
+    image = Nx.template(size, :s32)
+
+    block([left, right], {image, image}, default, fn ->
+      kernel = %NxIREE.Vulkan.Kernel{
+        spirv: Map.fetch!(@spirv, :decode_half),
+        workgroups: {ceil_div(height * width, @group), 1, 1},
+        specialization: %{0 => width, 1 => height}
+      }
+
+      %NxIREE.Vulkan.Pipeline{
+        inputs: [:left, :right],
+        stages: [{kernel, [:left, :right], [left_half: image, right_half: image]}],
+        outputs: [:left_half, :right_half]
       }
     end)
   end

@@ -1,0 +1,22 @@
+#version 450
+// An exact 2x byte frame contains whole words, including rows with odd output widths.
+layout(local_size_x = 64) in;
+layout(constant_id = 0) const int WIDTH = 320;
+layout(constant_id = 1) const int HEIGHT = 240;
+layout(set = 0, binding = 0) readonly buffer Left { uint left_words[]; };
+layout(set = 0, binding = 1) readonly buffer Right { uint right_words[]; };
+layout(set = 0, binding = 2) writeonly buffer LeftHalf { int left_half[]; };
+layout(set = 0, binding = 3) writeonly buffer RightHalf { int right_half[]; };
+
+void main() {
+  int pixel = int(gl_GlobalInvocationID.x);
+  if (pixel >= WIDTH * HEIGHT) return;
+  int first = 4 * WIDTH * (pixel / WIDTH) + 2 * (pixel % WIDTH);
+  int second = first + 2 * WIDTH;
+  uint left_a = left_words[first / 4] >> (8 * (first % 4));
+  uint left_b = left_words[second / 4] >> (8 * (second % 4));
+  uint right_a = right_words[first / 4] >> (8 * (first % 4));
+  uint right_b = right_words[second / 4] >> (8 * (second % 4));
+  left_half[pixel] = int(((left_a & 255u) + ((left_a >> 8) & 255u) + (left_b & 255u) + ((left_b >> 8) & 255u) + 2u) / 4u);
+  right_half[pixel] = int(((right_a & 255u) + ((right_a >> 8) & 255u) + (right_b & 255u) + ((right_b >> 8) & 255u) + 2u) / 4u);
+}

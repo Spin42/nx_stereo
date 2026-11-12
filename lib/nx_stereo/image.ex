@@ -394,13 +394,14 @@ defmodule NxStereo.Image do
   ]
 
   @doc """
-  Shrinks a `u8` `{height, width}` image to `size` (`{height, width}`)
+  Shrinks a `u8` or `s32` `{height, width}` image to `size` (`{height, width}`)
   by area averaging, as OpenCV's `INTER_AREA`: each output pixel is the
-  mean of the input area it covers. The same size returns the image as it
-  is.
+  mean of the input area it covers. Pixel storage stays `s32` for devices
+  without byte storage. The same size returns the image as it is.
   """
   deftransform resize_area(image, {height, width} = size) do
     {in_height, in_width} = Nx.shape(image)
+    type = if Nx.type(image) == {:s, 32}, do: :s32, else: :u8
 
     cond do
       {in_height, in_width} == size ->
@@ -419,13 +420,11 @@ defmodule NxStereo.Image do
         |> Nx.transpose()
         |> Nx.round()
         |> Nx.clip(0, 255)
-        |> Nx.as_type(:u8)
+        |> Nx.as_type(type)
     end
   end
 
-  # Each output row is the weighted sum of the few input rows it covers,
-  # gathered from the flattened image: `Nx.gather`, as an axis `take`
-  # does not compile on NxIREE.
+  # Gather flattened area taps because NxIREE cannot compile an axis take.
   defp shrink_rows(image, size) do
     {in_size, width} = Nx.shape(image)
     {rows, weights} = area_weights(size, in_size)
@@ -443,11 +442,20 @@ defmodule NxStereo.Image do
     |> Nx.gather(indices)
     |> Nx.reshape({size, taps, width})
     |> Nx.multiply(Nx.reshape(weights, {size, taps, 1}))
-    |> Nx.sum(axes: [1])
+    |> sum_taps()
   end
 
-  # For each output pixel, the input pixels it covers and their shares,
-  # padded to the same count with zero weights.
+  # Each pixel accumulates its taps locally, without a shared output reduction.
+  defp sum_taps(weighted) do
+    taps = Nx.axis_size(weighted, 1)
+
+    for tap <- 0..(taps - 1) do
+      weighted |> Nx.slice_along_axis(tap, 1, axis: 1) |> Nx.squeeze(axes: [1])
+    end
+    |> Enum.reduce(fn pixels, total -> Nx.add(total, pixels) end)
+  end
+
+  # Pad each pixel's area taps to the same count with zero weights.
   defp area_weights(size, in_size) do
     scale = in_size / size
 
