@@ -453,7 +453,7 @@ defmodule NxStereo do
     minimum_f = Nx.as_type(minimum, :f32)
     winner_d = Nx.new_axis(base, 2) + winner
 
-    accepted = estimated and Nx.as_type(second, :f32) > minimum_f * penalties[2]
+    accepted = estimated and winner_d <= x and Nx.as_type(second, :f32) > minimum_f * penalties[2]
     denominator = lower + upper - 2 * minimum_f
     correction = Nx.clip((lower - upper) / (2 * Nx.max(denominator, 1)), -0.5, 0.5)
 

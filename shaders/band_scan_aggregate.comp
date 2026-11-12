@@ -53,11 +53,50 @@ void store_path(int pixel, int lane, uint own, bool add) {
 }
 
 #include "band_scan_lanes.glsl"
+#include "band_scan_scalar.glsl"
+
+void store_scalar_path(int pixel, uint previous[BAND], bool add) {
+  uint high[WORDS / 4];
+  for (int word = 0; word < WORDS / 4; ++word) high[word] = 0u;
+  for (int word = 0; word < WORDS; ++word) {
+    int at = pixel * AGG_WORDS + word;
+    uint own = pack_scalar(previous, word);
+    if (!add) {
+      paths[at] = own;
+    } else {
+      uint pair = own + paths[at];
+      uvec4 sum = uvec4(pair & 255u, (pair >> 8) & 255u, (pair >> 16) & 255u, pair >> 24);
+#if FIRST
+      int x = pixel % WIDTH, y = pixel / WIDTH;
+      uint horizontal = aggregate[(x * HEIGHT + y) * WORDS + word];
+      sum += uvec4(horizontal & 255u, (horizontal >> 8) & 255u,
+                   (horizontal >> 16) & 255u, horizontal >> 24);
+#else
+      sum += aggregate_at(pixel, word);
+#endif
+      paths[at] = sum.x | (sum.y << 10) | (sum.z << 20) | (sum.w << 30);
+      high[word / 4] |= (sum.w >> 2) << (8 * (word % 4));
+    }
+  }
+  if (add) {
+    for (int word = 0; word < WORDS / 4; ++word)
+      paths[pixel * AGG_WORDS + WORDS + word] = high[word];
+  }
+}
 
 void main() {
   load_params();
   int lane = int(gl_LocalInvocationID.x) % WORDS;
   int line = int(gl_GlobalInvocationID.x) / WORDS;
+  if (gl_SubgroupSize < uint(WORDS)) {
+    if (lane == 0 && line < lines_of(DX, DY)) {
+      int reverse_line = DX != 0 && folded() ? (2 * WIDTH - HEIGHT - line) % WIDTH : line;
+      scan_scalar(DX, DY, line, false);
+      memoryBarrierBuffer();
+      scan_scalar(-DX, -DY, reverse_line, true);
+    }
+    return;
+  }
   if (line < lines_of(DX, DY)) {
     // Opposite folded lines visit the same pixels, including both diagonals.
     int reverse_line = DX != 0 && folded() ? (2 * WIDTH - HEIGHT - line) % WIDTH : line;
