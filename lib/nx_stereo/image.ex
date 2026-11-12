@@ -505,20 +505,32 @@ defmodule NxStereo.Image do
   end
 
   @doc false
-  # `image` moved by `dy` rows and `dx` columns, the edge repeated: slices
-  # rather than an axis `take`, which NxIREE cannot compile.
-  def shift(image, dy, dx), do: image |> shift_axis(dy, 0) |> shift_axis(dx, 1)
+  def shift(image, dy, dx) do
+    # Slices avoid the axis take unsupported by NxIREE.
+    image |> shift_axis(dy, 0) |> shift_axis(dx, 1)
+  end
 
   defp shift_axis(image, 0, _axis), do: image
 
-  defp shift_axis(image, offset, axis) when offset > 0 do
+  defp shift_axis(image, offset, axis) do
+    size = Nx.axis_size(image, axis)
+
+    if abs(offset) >= size do
+      edge = if offset > 0, do: size - 1, else: 0
+      image |> Nx.slice_along_axis(edge, 1, axis: axis) |> Nx.broadcast(Nx.shape(image))
+    else
+      shift_inside(image, offset, axis)
+    end
+  end
+
+  defp shift_inside(image, offset, axis) when offset > 0 do
     size = Nx.axis_size(image, axis)
     edge = Nx.slice_along_axis(image, size - 1, 1, axis: axis)
     rest = Nx.slice_along_axis(image, offset, size - offset, axis: axis)
     Nx.concatenate([rest | List.duplicate(edge, offset)], axis: axis)
   end
 
-  defp shift_axis(image, offset, axis) do
+  defp shift_inside(image, offset, axis) do
     size = Nx.axis_size(image, axis)
     edge = Nx.slice_along_axis(image, 0, 1, axis: axis)
     rest = Nx.slice_along_axis(image, 0, size + offset, axis: axis)
