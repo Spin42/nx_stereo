@@ -20,7 +20,8 @@ void main() {
   vec2 d = disparity[pair];
   vec2 m = vec2(d.x > 0.0 ? fb / d.x : 0.0, d.y > 0.0 ? fb / d.y : 0.0);
   depth_m[pair] = m;
-  // Nx.round rounds halves away from zero; the depth is never negative.
-  vec2 mm = floor(m * 1000.0 + 0.5);
+  precise vec2 scaled_mm = m * 1000.0;
+  // Compare the fraction before rounding; adding 0.5 can itself round upward.
+  vec2 mm = max(floor(scaled_mm) + step(vec2(0.5), fract(scaled_mm)), vec2(0.0));
   depth_mm[pair] = (mm.x > 65535.0 ? 0u : uint(mm.x)) | ((mm.y > 65535.0 ? 0u : uint(mm.y)) << 16);
 }

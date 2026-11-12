@@ -103,8 +103,10 @@ defmodule NxStereo.Kernels do
     end)
   end
 
-  # The six sharpness sums of `left` and `right`, both u8 or both s32.
+  @doc false
   def sharpness(left, right, default) do
+    left = image_for_word_reads(left)
+    right = image_for_word_reads(right)
     {height, width} = Nx.shape(left)
 
     block([left, right], Nx.template({6}, :f32), default, fn ->
@@ -145,9 +147,10 @@ defmodule NxStereo.Kernels do
     end)
   end
 
-  # The row alignment sums of `left` and `right`, both u8 or both s32, and the
-  # f32 `disparity`, as {bands, 2 * reach + 2}.
+  @doc false
   def row_alignment(left, right, disparity, default) do
+    left = image_for_word_reads(left)
+    right = image_for_word_reads(right)
     {height, width} = Nx.shape(left)
     %{bands: bands, reach: reach, row_step: row_step} = @alignment
     sampled = ceil_div(height, row_step)
@@ -295,6 +298,13 @@ defmodule NxStereo.Kernels do
       workgroups: {columns, 1, 1},
       specialization: %{0 => rows, 1 => columns}
     }
+  end
+
+  # A whole-word byte load must fit within the image buffer.
+  defp image_for_word_reads(image) do
+    if Nx.type(image) == {:u, 8} and rem(Nx.size(image), 4) != 0,
+      do: Nx.as_type(image, :s32),
+      else: image
   end
 
   # The variant of an image-reading kernel for `image`'s type: s32 pixels, or bytes read as words.

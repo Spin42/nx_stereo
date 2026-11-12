@@ -45,8 +45,9 @@ void main() {
     int i = y * WIDTH + x;
     float d = disparity[i];
     if (!(d > 0.0)) continue;
-    // Nx.round rounds halves away from zero; d is positive.
-    int source = clamp(x - int(floor(d + 0.5)), 0, WIDTH - 1);
+    // Compare the fraction before rounding; adding 0.5 can itself round upward.
+    int rounded = int(floor(d) + step(0.5, fract(d)));
+    int source = clamp(x - rounded, 0, WIDTH - 1);
     int l = left_pixel(i);
     for (int o = -REACH; o <= REACH; ++o) {
       int row = clamp(y + o, 0, HEIGHT - 1);

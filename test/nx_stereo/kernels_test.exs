@@ -53,6 +53,30 @@ defmodule NxStereo.KernelsTest do
     nan |> Nx.logical_or(near) |> Nx.mean() |> Nx.to_number()
   end
 
+  test "depth rounds a value below half a millimetre down", %{devices: devices} do
+    disparity = Nx.tensor([[1.0, 1.0]])
+    baseline_m = Nx.f32(0.0004999999655410647)
+
+    for {uri, {millimetres, metres}} <-
+          on_gpus(devices, &Depth.depth(&1, 1.0, &2), [disparity, baseline_m]) do
+      assert Nx.to_list(millimetres) == [[0, 0]], uri
+      assert Nx.to_flat_list(metres) == List.duplicate(Nx.to_number(baseline_m), 2)
+    end
+  end
+
+  test "depth millimetres remain zero for a negative baseline", %{devices: devices} do
+    disparity = Nx.tensor([[10.0, 20.0, -1.0, 0.0]])
+
+    for {uri, {millimetres, metres}} <-
+          on_gpus(devices, &Depth.depth(&1, 400.0, -0.06), [disparity]) do
+      assert Nx.to_list(millimetres) == [[0, 0, 0, 0]], uri
+      [near, farther, unmatched, zero] = Nx.to_flat_list(metres)
+      assert_in_delta near, -2.4, 1.0e-6
+      assert_in_delta farther, -1.2, 1.0e-6
+      assert {unmatched, zero} == {0.0, 0.0}
+    end
+  end
+
   @k [436.0, 0.0, 364.0, 0.0, 436.0, 272.0, 0.0, 0.0, 1.0]
   @r [0.9998, -0.0175, 0.0, 0.0175, 0.9998, 0.0, 0.0, 0.0, 1.0]
   @p [218.0, 0.0, 182.0, 0.0, 0.0, 218.0, 136.0, 0.0, 0.0, 0.0, 1.0, 0.0]
@@ -101,6 +125,29 @@ defmodule NxStereo.KernelsTest do
 
       for {uri, got} <- on_gpus(devices, fun, [left, right]),
           do: assert(close(got, want, 1.0e-5, true) == 1.0, uri)
+    end
+
+    test "row alignment rounds #{type} disparities around a half pixel", %{devices: devices} do
+      image = Nx.iota({4, 16}, axis: 1, type: unquote(type)) |> Nx.multiply(8) |> Nx.add(1)
+      zero_costs = List.duplicate([0.0, 0.0, 0.0, 0.0, 0.0, 4.0], 4)
+
+      shifted_costs = [
+        [24.0, 24.0, 24.0, 24.0, 24.0, 4.0]
+        | List.duplicate([32.0, 32.0, 32.0, 32.0, 32.0, 4.0], 3)
+      ]
+
+      for {disparity, expected} <- [
+            {0.4999999701976776, zero_costs},
+            {0.5, shifted_costs},
+            {0.5000000596046448, shifted_costs}
+          ] do
+        disparity = Nx.broadcast(Nx.f32(disparity), {4, 16})
+
+        for {uri, sums} <-
+              on_gpus(devices, &Diagnostics.row_alignment_sums/3, [image, image, disparity]) do
+          assert Nx.to_list(sums) == expected, uri
+        end
+      end
     end
 
     test "the row alignment kernel sums #{type} images as its Nx code does", %{
